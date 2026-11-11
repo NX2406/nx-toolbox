@@ -1,0 +1,23 @@
+NX Toolbox (nx.sh)
+Copyright (c) NX2406
+
+This product includes functionality adapted from kejilion/sh
+(https://github.com/kejilion/sh, commit 1faee13f3faef164efbfa899e244fc19ad58aaff),
+which is licensed under the Apache License, Version 2.0.
+A copy of that license is provided in THIRD_PARTY_LICENSES/kejilion-sh-Apache-2.0.txt.
+
+Adapted parts (rewritten, not copied verbatim): the overall menu layout, the system
+information collection (CPU usage sampling from /proc/stat, uptime formatting), the
+multi-distro update/clean flows, the BBR sysctl approach, the list of third-party
+test scripts in the "测试脚本合集" menu, the step list of the one-click system tuning
+("一条龙系统调优"), and the app market entries (official install commands of 1Panel,
+BT Panel and aaPanel, and the docker run parameters for OpenList).
+
+The following projects by NX2406 are integrated:
+  - vps-PSL  (https://github.com/NX2406/vps-PSL)  invoked as-is for port speed limiting
+  - ovhroot  (https://github.com/NX2406/ovhroot)  root-login logic re-implemented in nx.sh,
+             the original script is also available from the menu
+
+Third-party scripts in the test menu, NextTrace, LinuxMirrors, bin456789/reinstall,
+ylx2016/Linux-NetSpeed, get.docker.com and Incus are downloaded and run from their
+upstream sources at the user's request; they are not distributed with this project.
