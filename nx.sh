@@ -8,7 +8,7 @@
 [ -z "${BASH_VERSION:-}" ] && { echo "请使用 bash 运行本脚本" >&2; exit 1; }
 if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then echo "需要 bash 4.0 及以上版本" >&2; exit 1; fi
 
-NX_VERSION="1.1.1"
+NX_VERSION="1.2.0"
 NX_REPO="NX2406/nx-toolbox"
 NX_RAW_URL="https://raw.githubusercontent.com/${NX_REPO}/main/nx.sh"
 NX_BIN="/usr/local/bin/nx"
@@ -123,7 +123,20 @@ is_ipv4() {
   local i
   for i in 1 2 3 4; do (( 10#${BASH_REMATCH[i]} <= 255 )) || return 1; done
 }
-is_ipv6() { [[ ( $1 == *:*:* || $1 == *::* ) && $1 =~ ^[0-9A-Fa-f:.]+$ ]]; }
+# 按 RFC 4291 的文本格式校验：每组 1-4 位十六进制，共 8 组；:: 至多一次，代表至少一组 0；末尾可以是 IPv4。不接受 %网卡 和 /前缀
+is_ipv6() {
+  local a=$1 h t ch ct n re='^([0-9A-Fa-f]{1,4}(:[0-9A-Fa-f]{1,4})*)?$'
+  [[ $a == *:* && $a =~ ^[0-9A-Fa-f:.]+$ ]] || return 1
+  if [[ $a == *.* ]]; then
+    is_ipv4 "${a##*:}" || return 1
+    a=${a%:*}:0:0
+  fi
+  if [[ $a == *::* ]]; then h=${a%%::*}; t=${a#*::}; else h=$a; t=""; fi
+  [[ $h =~ $re && $t =~ $re ]] || return 1
+  ch=${h//[^:]/}; ct=${t//[^:]/}
+  n=$(( (${#h} ? ${#ch} + 1 : 0) + (${#t} ? ${#ct} + 1 : 0) ))
+  if [[ $a == *::* ]]; then (( n <= 7 )); else (( n == 8 )); fi
+}
 is_ip() { is_ipv4 "$1" || is_ipv6 "$1"; }
 
 rand_pass() { tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c "${1:-16}"; }
@@ -275,6 +288,26 @@ run_remote() {
 run_cmd() {
   printf '  %s$ %s%s\n' "$C_GRY" "$1" "$C_RST"
   bash -c "$1"
+}
+
+# run_url [--sh] 地址 [参数...]：第三方一键脚本先下载到临时文件再执行，返回脚本自己的退出码。
+# 不用 bash <(curl …) 或 curl … | bash：那两种写法下载失败时外层仍返回 0，菜单看起来什么都没发生
+run_url() {
+  local interp=bash get=dl url tmp rc
+  if [[ ${1:-} == --sh ]]; then interp="sh"; shift; fi
+  url=$1; shift
+  case $url in https://raw.githubusercontent.com/*|https://github.com/*) get=gh_dl ;; esac
+  tmp=$(mktemp /tmp/nx-run.XXXXXX) || { err "无法创建临时文件"; return 1; }
+  info "获取脚本: $url"
+  if ! "$get" "$url" "$tmp" 120; then rm -f "$tmp"; err "下载失败: $url"; return 1; fi
+  if [[ ! -s $tmp ]] || ! "$interp" -n "$tmp" 2>/dev/null; then
+    rm -f "$tmp"; err "下载到的不是完整的脚本: $url"; return 1
+  fi
+  printf '  %s$ %s %s%s%s\n' "$C_GRY" "$interp" "${url##*/}" "${*:+ $*}" "$C_RST"
+  "$interp" "$tmp" "$@"
+  rc=$?
+  rm -f "$tmp"
+  return "$rc"
 }
 
 IPV4_CACHE=""; IPV6_CACHE=""
@@ -846,29 +879,28 @@ menu_tests() {
     item 0 "返回"
     read_choice c
     case $c in
-      1) run_cmd 'bash <(curl -Ls IP.Check.Place)'; pause ;;
-      2) run_cmd 'bash <(curl -Ls Net.Check.Place)'; pause ;;
-      3) run_cmd 'bash <(curl -L -s check.unlock.media)'; pause ;;
-      11) run_cmd 'curl -sL nxtrace.org/nt | bash && nexttrace --fast-trace --tcp'; pause ;;
-      12) run_cmd 'curl -sSf https://raw.githubusercontent.com/zhanghanyun/backtrace/main/install.sh | sh && backtrace'; pause ;;
+      1) run_url IP.Check.Place; pause ;;
+      2) run_url Net.Check.Place; pause ;;
+      3) run_url check.unlock.media; pause ;;
+      11) run_url nxtrace.org/nt && nexttrace --fast-trace --tcp; pause ;;
+      12) run_url --sh https://raw.githubusercontent.com/zhanghanyun/backtrace/main/install.sh && backtrace; pause ;;
       13)
         ask h "目标 IP 或域名" "" || continue
         if [[ $h =~ ^[A-Za-z0-9.:-]+$ ]]; then
-          has nexttrace || run_cmd 'curl -sL nxtrace.org/nt | bash'
-          nexttrace "$h"
+          if has nexttrace || run_url nxtrace.org/nt; then nexttrace "$h"; fi
         else
           err "地址无效"
         fi
         pause ;;
-      14) run_cmd 'bash <(curl -sL https://raw.githubusercontent.com/i-abc/Speedtest/main/speedtest.sh)'; pause ;;
+      14) run_url https://raw.githubusercontent.com/i-abc/Speedtest/main/speedtest.sh; pause ;;
       15)
         ask h "主机" "" || continue; ask p "端口" "443" || continue
         if [[ $h =~ ^[A-Za-z0-9.:-]+$ ]] && is_port "$p"; then tcping_host "$h" "$p" 5; else err "输入无效"; fi
         pause ;;
-      21) run_cmd 'wget -qO- bench.sh | bash'; pause ;;
-      22) run_cmd 'curl -sL yabs.sh | bash'; pause ;;
-      23) run_cmd 'bash <(wget -qO- bash.spiritlhl.net/ecs)'; pause ;;
-      24) run_cmd 'bash <(curl -sL https://run.NodeQuality.com)'; pause ;;
+      21) run_url bench.sh; pause ;;
+      22) run_url yabs.sh; pause ;;
+      23) run_url bash.spiritlhl.net/ecs; pause ;;
+      24) run_url https://run.NodeQuality.com; pause ;;
       0|"") return ;;
     esac
   done
@@ -1149,6 +1181,8 @@ root_login() {
   tmp=$(mktemp)
   awk 'NF && !seen[$0]++' /root/.ssh/authorized_keys > "$tmp" && cat "$tmp" > /root/.ssh/authorized_keys
   rm -f "$tmp"
+  # SELinux 下新建的 .ssh 可能带着错误的安全上下文，sshd 读不到公钥
+  if has restorecon; then restorecon -R /root/.ssh >/dev/null 2>&1; fi
   if [[ $n -eq 0 && $mode == key ]]; then
     warn "没有找到可同步的用户公钥（可在「SSH 密钥登录」中手动添加），root 将无法用密钥登录"
   fi
@@ -1281,8 +1315,8 @@ menu_f2b() {
     read_choice c
     case $c in
       1) f2b_install; pause ;;
-      2) ask ip "要解封的 IP（all 为全部）" "" && { if [[ $ip == all ]]; then fail2ban-client unban --all; elif is_ip "$ip"; then fail2ban-client set sshd unbanip "$ip"; fi; }; pause ;;
-      3) ask ip "要封禁的 IP" "" && is_ip "$ip" && fail2ban-client set sshd banip "$ip"; pause ;;
+      2) ask ip "要解封的 IP（all 为全部）" "" && { if [[ $ip == all ]]; then fail2ban-client unban --all; elif is_ip "$ip"; then fail2ban-client set sshd unbanip "$ip"; elif [[ -n $ip ]]; then err "IP 无效: $ip"; fi; }; pause ;;
+      3) ask ip "要封禁的 IP" "" && { if is_ip "$ip"; then fail2ban-client set sshd banip "$ip"; elif [[ -n $ip ]]; then err "IP 无效: $ip"; fi; }; pause ;;
       4) tail -n 40 /var/log/fail2ban.log 2>/dev/null || journalctl -u fail2ban -n 40 --no-pager; pause ;;
       5)
         confirm "卸载 fail2ban?" N || continue
@@ -1527,8 +1561,30 @@ menu_firewall() {
 }
 
 # ================================================================== 定时任务
+# 最小化安装的系统可能没有 crontab：按发行版装上 cron 并启动服务
+cron_ready() {
+  local p s
+  if ! has crontab; then
+    case $(pkg_mgr) in apt-get|zypper) p=cron ;; *) p=cronie ;; esac
+    info "系统没有 crontab，安装 $p"
+    pkg_install "$p" >/dev/null 2>&1
+    has crontab || { err "安装 $p 失败，定时任务需要 crontab 命令"; return 1; }
+  fi
+  for s in cron crond cronie; do
+    if has systemctl && systemctl list-unit-files "$s.service" 2>/dev/null | grep -q "^$s.service"; then
+      systemctl is-active -q "$s" || systemctl enable --now "$s" >/dev/null 2>&1 || warn "cron 服务启动失败，任务可能不会按时执行"
+      return 0
+    elif has rc-service && [[ -f /etc/init.d/$s ]]; then
+      rc-service "$s" status >/dev/null 2>&1 || { rc-update add "$s" default >/dev/null 2>&1; rc-service "$s" start >/dev/null 2>&1; } || warn "cron 服务启动失败，任务可能不会按时执行"
+      return 0
+    fi
+  done
+  warn "没有找到 cron 服务：任务会写入 crontab，但不会按时执行"
+}
+
 menu_cron() {
   local c s cmd n tmp
+  cron_ready || { pause; return 1; }
   while :; do
     title "定时任务（root crontab）"
     crontab -l 2>/dev/null | grep -v '^#' | grep -v '^\s*$' | awk '{print "  " NR ") " $0}'
@@ -1543,14 +1599,14 @@ menu_cron() {
         ask s "执行时间" "0 4 * * *" || continue
         ask cmd "命令" "" || continue
         [[ -n $cmd ]] || continue
-        (crontab -l 2>/dev/null; echo "$s $cmd") | crontab - && ok "已添加"
+        if (crontab -l 2>/dev/null; echo "$s $cmd") | crontab -; then ok "已添加"; else err "添加失败，任务没有写入"; fi
         pause ;;
       2)
         ask n "删除第几条" "" || continue
         is_uint "$n" || continue
         tmp=$(mktemp)
         crontab -l 2>/dev/null | grep -v '^#' | grep -v '^\s*$' | awk -v n="$n" 'NR != n' > "$tmp"
-        crontab "$tmp" && ok "已删除"
+        if crontab "$tmp"; then ok "已删除"; else err "删除失败"; fi
         rm -f "$tmp"; pause ;;
       3) crontab -e ;;
       0|"") return ;;
@@ -1568,56 +1624,390 @@ menu_mirror() {
   item 0 "返回"
   read_choice c
   case $c in
-    1) run_cmd 'bash <(curl -sSL https://linuxmirrors.cn/main.sh)' ;;
-    2) run_cmd 'bash <(curl -sSL https://linuxmirrors.cn/main.sh) --abroad' ;;
-    3) run_cmd 'bash <(curl -sSL https://linuxmirrors.cn/main.sh) --edu' ;;
+    1) run_url https://linuxmirrors.cn/main.sh ;;
+    2) run_url https://linuxmirrors.cn/main.sh --abroad ;;
+    3) run_url https://linuxmirrors.cn/main.sh --edu ;;
     *) return ;;
   esac
   pause
 }
 
-menu_dd() {
-  local c os ver tmp url
-  local -a dd_args=()
-  title "一键 DD 重装系统（bin456789/reinstall）"
-  warn "重装会清空整块硬盘的全部数据！请先备份。部分虚拟化（OpenVZ/LXC）不支持"
+DD_URL="https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh"
+DD_URL_CN="https://cnb.cool/bin456789/reinstall/-/git/raw/main/reinstall.sh"
+DD_SCRIPT=/root/reinstall.sh
+DD_KEYS=/root/.nx-dd-keys
+DD_READY=0
+DD_MEM_MB=0
+DD_DISK_GB=0
+# 显示名|reinstall 里的系统名|内置版本（读不到 reinstall 自带的列表时用）|推荐版本（@last 表示最新）
+DD_OS_LIST=(
+  "Debian|debian|9 10 11 12 13|13"
+  "Ubuntu|ubuntu|18.04 20.04 22.04 24.04 26.04 26.10|24.04"
+  "Rocky Linux|rocky|8 9 10|9"
+  "AlmaLinux|almalinux|8 9 10|9"
+  "CentOS Stream|centos|9 10|10"
+  "Oracle Linux|oracle|8 9 10|9"
+  "Fedora|fedora|44 45|@last"
+  "Alpine|alpine|3.21 3.22 3.23 3.24|@last"
+  "openSUSE|opensuse|16.0 16.1 tumbleweed|16.0"
+  "Kali|kali|last-snapshot rolling|rolling"
+  "openEuler|openeuler|20.03 22.03 24.03 26.09|24.03"
+  "Anolis OS|anolis|7 8 23|8"
+  "OpenCloudOS|opencloudos|8 9 23|9"
+  "NixOS|nixos|26.05|@last"
+  "Arch Linux|arch||"
+  "Gentoo|gentoo||"
+  "AOSC OS|aosc||"
+  "飞牛 fnOS|fnos|1|1"
+)
+# 显示名|--image-name
+DD_WIN_LIST=(
+  "Windows 11 专业版|windows 11 pro"
+  "Windows 11 企业版 LTSC 2024|windows 11 enterprise ltsc 2024"
+  "Windows 10 专业版|windows 10 pro"
+  "Windows 10 企业版 LTSC 2021|windows 10 enterprise ltsc 2021"
+  "Windows Server 2025 数据中心版|windows server 2025 serverdatacenter"
+  "Windows Server 2022 数据中心版|windows server 2022 serverdatacenter"
+  "Windows Server 2019 数据中心版|windows server 2019 serverdatacenter"
+)
+
+dd_fetch() {
+  [[ $DD_READY == 1 && -s $DD_SCRIPT ]] && return 0
+  local url=$DD_URL
+  in_china && url=$DD_URL_CN
+  info "下载 reinstall.sh ..."
+  if { dl "$url" "$DD_SCRIPT" 60 || gh_dl "$DD_URL" "$DD_SCRIPT" 60; } && bash -n "$DD_SCRIPT" 2>/dev/null; then
+    DD_READY=1
+    return 0
+  fi
+  rm -f "$DD_SCRIPT"
+  err "下载 reinstall.sh 失败"
+  return 1
+}
+
+# 从 reinstall.sh 的用法说明里读出某个系统支持的版本，空格分隔
+dd_versions() {
+  awk -v d="$1" '
+    /^Usage:/ { u = 1 }
+    u && /Options:/ { exit }
+    u {
+      sub(/^Usage:[ \t]*[^ \t]+[ \t]+/, ""); sub(/^[ \t]+/, "")
+      if ($1 == d && $2 != "" && $2 !~ /^(-|\[)/) { gsub(/\|/, " ", $2); print $2; exit }
+    }' "$DD_SCRIPT" 2>/dev/null
+}
+
+dd_hw() {
+  local disk
+  DD_MEM_MB=$(awk '/^MemTotal:/ { printf "%d", $2 / 1024 }' /proc/meminfo)
+  disk=$(lsblk -dbno NAME,SIZE,TYPE 2>/dev/null | awk '$3 == "disk" && $1 !~ /^(zram|ram|loop)/ { printf "%s%s %.0f GB", s, $1, $2 / 1073741824; s = "，" }')
+  DD_DISK_GB=$(lsblk -dbno NAME,SIZE,TYPE 2>/dev/null | awk '$3 == "disk" && $1 !~ /^(zram|ram|loop)/ && $2 > m { m = $2 } END { printf "%d", m / 1073741824 }')
+  row "内存" "${DD_MEM_MB:-?} MB"
+  row "硬盘" "${disk:-未知}"
+  row "引导方式" "$([[ -d /sys/firmware/efi ]] && echo UEFI || echo BIOS)"
+  row "虚拟化" "$(virt_type)"
+}
+
+# 16 位随机密码，保证同时有大写、小写和数字（满足 Windows 的密码复杂度）
+dd_rand_pass() {
+  local p
+  while :; do
+    p=$(rand_pass 16)
+    [[ $p =~ [0-9] && $p =~ [a-z] && $p =~ [A-Z] ]] && break
+  done
+  echo "$p"
+}
+
+# $1=变量名，$2=win 时按 Windows 规则检查；直接回车随机生成
+dd_ask_pass() {
+  local __p __q __n
+  while :; do
+    ask_secret __p "新系统的登录密码（直接回车随机生成）" || return 1
+    if [[ -z $__p ]]; then
+      __p=$(dd_rand_pass)
+      break
+    fi
+    if [[ ${2:-} == win ]]; then
+      __n=0
+      [[ $__p =~ [a-z] ]] && __n=$((__n + 1))
+      [[ $__p =~ [A-Z] ]] && __n=$((__n + 1))
+      [[ $__p =~ [0-9] ]] && __n=$((__n + 1))
+      [[ $__p =~ [^A-Za-z0-9] ]] && __n=$((__n + 1))
+      if ((${#__p} < 8 || __n < 3)); then
+        err "Windows 要求密码至少 8 位，并包含大写、小写、数字、符号中的三类"
+        [[ -t 0 ]] || return 1
+        continue
+      fi
+    fi
+    ask_secret __q "再输入一次" || return 1
+    [[ $__p == "$__q" ]] && break
+    err "两次输入不一致"
+    [[ -t 0 ]] || return 1
+  done
+  printf -v "$1" '%s' "$__p"
+}
+
+# ask 自己用 __v 传变量名，这里不能再用 __v
+dd_ask_port() {
+  local __port
+  while :; do
+    ask __port "$2" "$3" || return 1
+    is_port "$__port" && break
+    err "端口无效：$__port"
+    [[ -t 0 ]] || return 1
+  done
+  printf -v "$1" '%s' "$__port"
+}
+
+# 当前 root 能直接用的公钥（去掉 command= 等限制选项并去重）写入 DD_KEYS，输出条数
+dd_collect_keys() {
+  local f=/root/.ssh/authorized_keys
+  rm -f "$DD_KEYS"
+  if [[ -s $f ]]; then
+    (umask 077; grep -oE '(ssh-(ed25519|rsa)|ecdsa-sha2-nistp(256|384|521)) [A-Za-z0-9+/=]+' "$f" | awk '!seen[$2]++' >"$DD_KEYS")
+  fi
+  if [[ -s $DD_KEYS ]]; then
+    wc -l <"$DD_KEYS" | tr -d ' '
+  else
+    rm -f "$DD_KEYS"
+    echo 0
+  fi
+}
+
+dd_login_linux() {
+  local n c k pw port def=1
+  local re_key='^(ssh-(ed25519|rsa)|ecdsa-sha2-nistp(256|384|521)) [A-Za-z0-9+/=]+'
+  n=$(dd_collect_keys)
+  echo
+  info "新系统 root 的登录方式（reinstall 只能二选一：密码或公钥）"
+  item 1 "密码登录"
+  if ((n > 0)); then
+    item 2 "公钥登录：沿用当前 root 的 $n 个公钥（推荐，登录方式和现在一样）"
+    def=2
+  fi
+  item 3 "公钥登录：填公钥、github:用户名 或 公钥链接"
+  ask c "选择" "$def" || return 1
+  case $c in
+    1)
+      dd_ask_pass pw || return 1
+      DD_ARGS+=(--password "$pw")
+      DD_PASS=$pw
+      DD_LOGIN="root + 密码" ;;
+    2)
+      ((n > 0)) || { err "当前 root 没有可沿用的公钥"; return 1; }
+      DD_ARGS+=(--ssh-key "$DD_KEYS")
+      DD_LOGIN="root + 现在的 $n 个公钥（不设密码）" ;;
+    3)
+      ask k "公钥 / github:用户名 / gitlab:用户名 / https 链接" "" || return 1
+      if [[ $k =~ $re_key || $k =~ ^(gh|github|gl|gitlab):[A-Za-z0-9._-]+$ || $k =~ ^https?://[^[:space:]]+$ ]]; then
+        DD_ARGS+=(--ssh-key "$k")
+        DD_LOGIN="root + 公钥 ${k:0:40}（不设密码）"
+      else
+        err "格式不对：应为 ssh-ed25519 / ssh-rsa / ecdsa 公钥、github:用户名 或 https 链接"
+        return 1
+      fi ;;
+    *) return 2 ;;
+  esac
+  dd_ask_port port "新系统 SSH 端口" 22 || return 1
+  [[ $port == 22 ]] || DD_ARGS+=(--ssh-port "$port")
+  DD_LOGIN+="，SSH 端口 $port"
+}
+
+dd_linux() {
+  local c i n name id builtin rec vers v
+  local -a list=()
+  title "选择要安装的 Linux"
+  n=${#DD_OS_LIST[@]}
+  for ((i = 0; i < n; i += 2)); do
+    if ((i + 1 < n)); then
+      item2 $((i + 1)) "${DD_OS_LIST[i]%%|*}" $((i + 2)) "${DD_OS_LIST[i + 1]%%|*}"
+    else
+      item $((i + 1)) "${DD_OS_LIST[i]%%|*}"
+    fi
+  done
+  item 0 "返回"
+  read_choice c
+  [[ $c =~ ^[0-9]+$ ]] && ((c >= 1 && c <= n)) || return 2
+  IFS='|' read -r name id builtin rec <<<"${DD_OS_LIST[c - 1]}"
+  dd_fetch || return 1
+  vers=$(dd_versions "$id")
+  [[ -n $vers ]] || vers=$builtin
+  DD_ARGS=("$id")
+  DD_DESC=$name
+  if [[ -n $vers ]]; then
+    read -ra list <<<"$vers"
+    if [[ $rec == @last || " $vers " != *" $rec "* ]]; then rec=${list[${#list[@]} - 1]}; fi
+    echo
+    for ((i = 0; i < ${#list[@]}; i++)); do
+      if [[ ${list[i]} == "$rec" ]]; then item $((i + 1)) "$name ${list[i]}（推荐）"; else item $((i + 1)) "$name ${list[i]}"; fi
+    done
+    ask v "选择版本（填序号或版本号）" "$rec" || return 1
+    if [[ " $vers " != *" $v "* && $v =~ ^[0-9]+$ ]] && ((v >= 1 && v <= ${#list[@]})); then v=${list[v - 1]}; fi
+    [[ $v =~ ^[A-Za-z0-9._-]+$ ]] || { err "版本号无效：$v"; return 1; }
+    [[ " $vers " == *" $v "* ]] || warn "$v 不在 reinstall 列出的版本里，交给 reinstall 判断"
+    DD_ARGS+=("$v")
+    DD_DESC+=" $v"
+  fi
+  if [[ $id == ubuntu ]] && confirm_opt "使用 Ubuntu minimal 精简版?" N; then
+    DD_ARGS+=(--minimal)
+    DD_DESC+=" minimal"
+  fi
+  DD_ARGS+=(--username root)
+  dd_login_linux
+}
+
+dd_windows() {
+  local c i n name img lang rdp pw
+  title "安装 Windows（自动从微软官方下载 ISO）"
+  n=${#DD_WIN_LIST[@]}
+  for ((i = 0; i < n; i++)); do item $((i + 1)) "${DD_WIN_LIST[i]%%|*}"; done
+  item $((n + 1)) "其它版本（自己填镜像名，如 windows 11 enterprise）"
+  item 0 "返回"
+  read_choice c
+  if [[ $c =~ ^[0-9]+$ ]] && ((c >= 1 && c <= n)); then
+    name=${DD_WIN_LIST[c - 1]%%|*}
+    img=${DD_WIN_LIST[c - 1]#*|}
+  elif [[ $c == "$((n + 1))" ]]; then
+    ask img "镜像名" "" || return 1
+    img=$(tr '[:upper:]' '[:lower:]' <<<"$img")
+    [[ $img =~ ^windows\ [a-z0-9.\ ]+$ ]] || { err "镜像名要以 windows 开头，如 windows 11 pro"; return 1; }
+    name=$img
+  else
+    return 2
+  fi
+  echo
+  item 1 "简体中文 zh-cn"
+  item 2 "English en-us"
+  item 3 "其它语言（填 xx-yy，如 zh-tw、ja-jp）"
+  ask c "系统语言" 1 || return 1
+  case $c in
+    1) lang=zh-cn ;;
+    2) lang=en-us ;;
+    3)
+      ask lang "语言代码" "" || return 1
+      lang=$(tr '[:upper:]' '[:lower:]' <<<"$lang")
+      [[ $lang =~ ^[a-z]{2}(-[a-z]{2,4})*$ ]] || { err "语言代码无效：$lang"; return 1; } ;;
+    *) return 2 ;;
+  esac
+  dd_ask_pass pw win || return 1
+  dd_ask_port rdp "远程桌面 RDP 端口" 3389 || return 1
+  DD_ARGS=(windows --image-name "$img" --lang "$lang" --username administrator --password "$pw")
+  [[ $rdp == 3389 ]] || DD_ARGS+=(--rdp-port "$rdp")
+  confirm_opt "允许 ping（放行 ICMP）?" N && DD_ARGS+=(--allow-ping)
+  DD_PASS=$pw
+  DD_DESC="$name（$lang）"
+  DD_LOGIN="administrator + 密码，远程桌面端口 $rdp"
+  ((DD_MEM_MB > 0 && DD_MEM_MB < 1024)) && warn "内存不到 1 GB，Windows 安装和使用都会很慢"
+  ((DD_DISK_GB > 0 && DD_DISK_GB < 25)) && warn "硬盘只有 ${DD_DISK_GB} GB，Windows 建议至少 25 GB"
+  return 0
+}
+
+dd_image() {
+  local img pw
+  echo
+  info "镜像要求：raw 或 vhd 格式，可以用 .gz / .xz / .zst / .tar 打包；新系统的账号密码由镜像决定"
+  ask img "镜像直链（http/https）" "" || return 1
+  [[ -n $img ]] || return 2
+  [[ $img =~ ^https?://[^[:space:]]+$ ]] || { err "链接格式不对：$img"; return 1; }
+  pw=$(dd_rand_pass)
+  DD_ARGS=(dd --img "$img" --username root --password "$pw")
+  DD_PASS=$pw
+  DD_DESC="自定义镜像 $img"
+  DD_LOGIN="镜像自带的账号密码；安装过程中可用 root 和下面的密码 SSH 上来看进度"
+}
+
+dd_custom() {
+  local s rc
+  ask s "reinstall.sh 参数（如 debian 12 --ssh-port 2222，或 windows --image-name 'windows 11 pro' --lang zh-cn）" "" || return 1
+  [[ -n $s ]] || return 2
+  # 允许用引号，但不接受命令替换、管道、重定向等 shell 语法
+  if [[ $s == *[\$\`\;\|\&\<\>]* ]]; then err "参数不能包含 \$ \` ; | & < >"; return 1; fi
+  set -f
+  eval "DD_ARGS=($s)" 2>/dev/null
+  rc=$?
+  set +f
+  ((rc == 0)) || { err "参数格式无效（引号没配对?）"; return 1; }
+  ((${#DD_ARGS[@]})) || return 2
+  DD_DESC=${DD_ARGS[0]}
+  [[ ${DD_ARGS[1]:-} == -* ]] || DD_DESC+=" ${DD_ARGS[1]:-}"
+  DD_LOGIN="按所填参数；没给密码或公钥时 reinstall 会再问"
+}
+
+dd_run() {
+  local a mask=0
+  local -a show=()
+  dd_fetch || { pause; return 1; }
+  for a in "${DD_ARGS[@]}"; do
+    if ((mask)); then show+=("******"); mask=0; else show+=("$a"); fi
+    [[ $a == --password || $a == --passwd ]] && mask=1
+  done
+  title "确认重装"
+  row "重装为" "$DD_DESC"
+  row "登录" "$DD_LOGIN"
+  [[ -n $DD_PASS ]] && row "密码" "$DD_PASS"
+  row "执行" "bash $DD_SCRIPT ${show[*]}"
   hr
-  item2 1 "Debian 12" 2 "Debian 13"
-  item2 3 "Ubuntu 22.04" 4 "Ubuntu 24.04"
-  item2 5 "Rocky Linux 9" 6 "AlmaLinux 9"
-  item2 7 "Alpine Linux" 8 "自定义参数"
+  warn "继续后 reinstall.sh 会下载安装文件并修改引导；重启后开始重装，整块硬盘会被清空"
+  confirm "确认重装为 $DD_DESC?" N || return 0
+  confirm "再次确认：硬盘数据将全部丢失?" N || return 0
+  if bash "$DD_SCRIPT" "${DD_ARGS[@]}"; then
+    ok "准备完成，重启后开始重装（安装进度可在上面 reinstall 给出的网址查看）"
+    [[ -n $DD_PASS ]] && warn "请记好新系统的密码：$DD_PASS"
+    confirm "立即重启?" Y && reboot
+  else
+    err "reinstall.sh 执行失败（见上面的报错）；如果引导已被改动，可在 DD 菜单里选「取消已安排的重装」"
+  fi
+  pause
+}
+
+menu_dd() {
+  local c rc
+  local -a DD_ARGS=()
+  local DD_DESC="" DD_LOGIN="" DD_PASS=""
+  title "一键 DD 重装系统（bin456789/reinstall）"
+  if [[ $(virt_type) =~ ^(openvz|lxc)$ ]]; then err "OpenVZ / LXC 容器不能 DD 重装"; pause; return; fi
+  warn "重装会清空整块硬盘的全部数据！请先备份"
+  dd_hw
+  hr
+  item 1 "Linux（Debian、Ubuntu、Rocky、Alma、Alpine、Arch 等，先选系统再选版本）"
+  item 2 "Windows（自动从微软官方下载 ISO 安装）"
+  item 3 "DD 自定义镜像（填镜像直链）"
+  item 4 "netboot.xyz（重启后在服务商的 VNC 里选系统安装）"
+  item 5 "取消已安排、还没重启的重装"
+  item 6 "自定义参数（直接传给 reinstall.sh）"
   item 0 "返回"
   read_choice c
   case $c in
-    1) os=debian; ver=12 ;; 2) os=debian; ver=13 ;; 3) os=ubuntu; ver=22.04 ;; 4) os=ubuntu; ver=24.04 ;;
-    5) os=rocky; ver=9 ;; 6) os=almalinux; ver=9 ;; 7) os=alpine; ver="" ;;
-    8) ask os "reinstall.sh 参数（如 debian 12 或 windows --image-name '...' ）" "" || return; ver="" ;;
+    1) dd_linux ;;
+    2) dd_windows ;;
+    3) dd_image ;;
+    4) DD_ARGS=(netboot.xyz); DD_DESC=netboot.xyz; DD_LOGIN="重启后在服务商的 VNC 控制台里操作" ;;
+    5)
+      if dd_fetch && bash "$DD_SCRIPT" reset; then ok "已取消，重启后仍是当前系统"; fi
+      pause
+      return ;;
+    6) dd_custom ;;
     *) return ;;
   esac
-  [[ -n $os ]] || return
-  if [[ -n $ver ]]; then
-    dd_args=("$os" "$ver")
-  else
-    # 自定义参数允许用引号，但不接受命令替换、管道、重定向等 shell 语法
-    if [[ $os == *[\$\`\;\|\&\<\>]* ]]; then err "参数不能包含 \$ \` ; | & < >"; pause; return; fi
-    eval "dd_args=($os)" 2>/dev/null || { err "参数格式无效（引号未配对?）"; pause; return; }
+  rc=$?
+  if ((rc == 0)); then
+    dd_run
+  elif ((rc == 1)); then
+    pause
   fi
-  [[ $(virt_type) =~ ^(openvz|lxc)$ ]] && { err "容器虚拟化无法 DD"; pause; return; }
-  confirm "确认重装为 $os $ver?" N || return
-  confirm "再次确认：硬盘数据将全部丢失?" N || return
-  tmp=/root/reinstall.sh
-  url="https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh"
-  if in_china; then url="https://cnb.cool/bin456789/reinstall/-/git/raw/main/reinstall.sh"; fi
-  if ! dl "$url" "$tmp" 60 && ! gh_dl "https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh" "$tmp" 60; then
-    err "下载 reinstall.sh 失败"; pause; return
+  rm -f "$DD_KEYS"
+}
+
+# nx dd <reinstall 参数>：不进菜单，直接按参数重装（仍要确认，-y 跳过）
+dd_cli() {
+  local -a DD_ARGS=("$@")
+  local DD_DESC=$1 DD_LOGIN="按命令行参数" DD_PASS=""
+  [[ $(virt_type) =~ ^(openvz|lxc)$ ]] && die "OpenVZ / LXC 容器不能 DD 重装"
+  if [[ $1 == reset ]]; then
+    dd_fetch && bash "$DD_SCRIPT" reset
+    return
   fi
-  if bash "$tmp" "${dd_args[@]}"; then
-    ok "准备完成，重启后开始重装（按脚本提示的账号密码登录）"
-    confirm "立即重启?" Y && reboot
-  else
-    err "reinstall.sh 执行失败"
-  fi
-  pause
+  [[ ${2:-} == -* ]] || DD_DESC+=" ${2:-}"
+  dd_run
 }
 
 user_add() {
@@ -1665,6 +2055,8 @@ menu_system() {
     item2 13 "定时任务" 14 "切换软件源"
     item2 15 "一键 DD 重装系统" 16 "新建 sudo 用户"
     item2 17 "设置工具箱快捷命令" 18 "重启服务器"
+    item2 19 "zram 内存压缩" 20 "时间同步（chrony）"
+    item 21 "自动安全更新"
     item 0 "返回"
     read_choice c
     case $c in
@@ -1702,9 +2094,1502 @@ menu_system() {
         fi
         pause ;;
       18) confirm "确认立即重启服务器?" N && reboot ;;
+      19) menu_zram ;;
+      20) menu_timesync ;;
+      21) menu_autoupd ;;
       0|"") return ;;
     esac
   done
+}
+
+# ================================================================== 定时运行（systemd 优先，否则 cron）
+# sched_set 名称 minute|boot|daily=HH:MM 命令 描述
+sched_set() {
+  local name=$1 when=$2 cmd=$3 desc=$4 h m line
+  sched_del "$name"
+  if has systemctl && [[ -d /run/systemd/system ]]; then
+    {
+      printf '[Unit]\nDescription=%s\n' "$desc"
+      if [[ $when == boot ]]; then printf 'After=network-online.target\nWants=network-online.target\n'; fi
+      printf '\n[Service]\nType=oneshot\nExecStart=%s\n' "$cmd"
+      if [[ $when == boot ]]; then printf 'RemainAfterExit=yes\n\n[Install]\nWantedBy=multi-user.target\n'; fi
+    } >"/etc/systemd/system/$name.service"
+    if [[ $when != boot ]]; then
+      {
+        printf '[Unit]\nDescription=%s\n\n[Timer]\n' "$desc"
+        case $when in
+          minute) printf 'OnBootSec=1min\nOnUnitActiveSec=1min\nAccuracySec=5s\n' ;;
+          daily=*) printf 'OnCalendar=*-*-* %s:00\nPersistent=true\n' "${when#daily=}" ;;
+        esac
+        printf '\n[Install]\nWantedBy=timers.target\n'
+      } >"/etc/systemd/system/$name.timer"
+    fi
+    systemctl daemon-reload
+    if [[ $when == boot ]]; then
+      systemctl enable "$name.service" >/dev/null 2>&1
+    else
+      systemctl enable --now "$name.timer" >/dev/null 2>&1
+    fi
+    return 0
+  fi
+  cron_ready >/dev/null 2>&1 || return 1
+  case $when in
+    minute) line="* * * * *" ;;
+    boot) line="@reboot" ;;
+    daily=*)
+      h=${when#daily=}; m=${h#*:}; h=${h%:*}
+      line="$((10#$m)) $((10#$h)) * * *" ;;
+  esac
+  if [[ -d /etc/cron.d ]]; then
+    echo "$line root $cmd >/dev/null 2>&1" >"/etc/cron.d/$name"
+  else
+    echo "$line $cmd >/dev/null 2>&1 # $name" >>/etc/crontabs/root
+  fi
+}
+
+sched_del() {
+  local name=$1
+  if has systemctl; then systemctl disable --now "$name.timer" "$name.service" >/dev/null 2>&1; fi
+  rm -f "/etc/systemd/system/$name.service" "/etc/systemd/system/$name.timer" "/etc/cron.d/$name"
+  if [[ -f /etc/crontabs/root ]]; then sed -i "/ # $name\$/d" /etc/crontabs/root; fi
+  if has systemctl; then systemctl daemon-reload >/dev/null 2>&1; fi
+  return 0
+}
+
+# ini_set 文件 节 键 值：改掉该节里这个键（含被注释的）的所有行，只留一行；没有就加在节末尾
+ini_set() {
+  local f=$1 s=$2 k=$3 v=$4
+  [[ -f $f ]] || : >"$f"
+  if ! grep -q "^\[$s\]" "$f"; then
+    { [[ -s $f ]] && echo; printf '[%s]\n%s = %s\n' "$s" "$k" "$v"; } >>"$f"
+    return 0
+  fi
+  awk -v s="[$s]" -v k="$k" -v v="$v" '
+    $0 == s { sec = 1; print; next }
+    sec && /^\[/ { if (!done) print k " = " v; done = 1; sec = 0 }
+    sec && $0 ~ "^[#; ]*" k "[ \t]*=" { if (!done) print k " = " v; done = 1; next }
+    { print }
+    END { if (sec && !done) print k " = " v }' "$f" >"$f.nx" && cat "$f.nx" >"$f" && rm -f "$f.nx"
+}
+
+# ================================================================== zram 内存压缩交换
+ZRAM_CONF="$NX_DIR/zram.conf"
+ZRAM_SH="$NX_DIR/nx-zram.sh"
+ZRAM_UNIT=nx-zram
+
+# 系统自带的 zram 管理（zram-generator / zram-tools / zram-config）在用时不重复配置
+zram_other_manager() {
+  local u
+  has systemctl || return 1
+  for u in systemd-zram-setup@zram0 zramswap zram-config; do
+    if systemctl is-active -q "$u" 2>/dev/null; then echo "$u"; return 0; fi
+  done
+  return 1
+}
+
+zram_write_helper() {
+  cat >"$ZRAM_SH" <<'EOF'
+#!/bin/sh
+# NX 工具箱生成：按 /etc/nx/zram.conf 建立 zram swap，开机由 nx-zram 服务调用
+. /etc/nx/zram.conf || exit 1
+case "$1" in
+  start)
+    [ -e /sys/block/zram0 ] || modprobe zram 2>/dev/null
+    [ -e /sys/block/zram0 ] || cat /sys/class/zram-control/hot_add >/dev/null 2>&1
+    [ -e /sys/block/zram0 ] || { echo "zram 不可用" >&2; exit 1; }
+    swapoff /dev/zram0 2>/dev/null
+    echo 1 >/sys/block/zram0/reset 2>/dev/null
+    if grep -qw "$ALGO" /sys/block/zram0/comp_algorithm 2>/dev/null; then echo "$ALGO" >/sys/block/zram0/comp_algorithm; fi
+    echo "${SIZE_MB}M" >/sys/block/zram0/disksize || exit 1
+    mkswap /dev/zram0 >/dev/null || exit 1
+    swapon -p "${PRIO:-100}" /dev/zram0 ;;
+  stop)
+    swapoff /dev/zram0 2>/dev/null
+    [ -e /sys/block/zram0/reset ] && echo 1 >/sys/block/zram0/reset
+    exit 0 ;;
+esac
+EOF
+  chmod 755 "$ZRAM_SH"
+}
+
+zram_on() {
+  local size algo a other mem def
+  if [[ $(virt_type) =~ ^(openvz|lxc)$ ]]; then err "容器虚拟化不能加载内核模块，用不了 zram"; return 1; fi
+  if other=$(zram_other_manager); then err "系统已经由 $other 管理 zram，不重复配置"; return 1; fi
+  [[ -e /sys/block/zram0 ]] || modprobe zram 2>/dev/null || true
+  [[ -e /sys/block/zram0 ]] || cat /sys/class/zram-control/hot_add >/dev/null 2>&1 || true
+  [[ -e /sys/block/zram0 ]] || { err "内核没有 zram 模块"; return 1; }
+  mem=$(awk '/^MemTotal:/ { printf "%d", $2 / 1024 }' /proc/meminfo)
+  def=$((mem / 2))
+  ((def > 8192)) && def=8192
+  ask size "zram 大小（MB，按压缩前算，一般取内存的一半）" "$def" || return 1
+  if ! is_uint "$size" || ((size < 64 || size > mem * 2)); then err "大小应在 64 到 $((mem * 2)) MB 之间"; return 1; fi
+  algo=lzo
+  for a in zstd lz4 lzo-rle lzo; do
+    if grep -qw "$a" /sys/block/zram0/comp_algorithm 2>/dev/null; then algo=$a; break; fi
+  done
+  mkdir -p "$NX_DIR"
+  printf 'SIZE_MB=%s\nALGO=%s\nPRIO=100\n' "$size" "$algo" >"$ZRAM_CONF"
+  zram_write_helper
+  "$ZRAM_SH" start || { err "zram 启用失败"; return 1; }
+  sched_set "$ZRAM_UNIT" boot "$ZRAM_SH start" "NX zram swap"
+  ok "zram 已启用：$size MB（$algo 压缩，优先于硬盘 swap 使用），开机自动恢复"
+}
+
+zram_off() {
+  if [[ ! -f $ZRAM_CONF && ! -f $ZRAM_SH ]]; then info "没有由工具箱开启的 zram"; return 0; fi
+  if [[ -x $ZRAM_SH ]]; then "$ZRAM_SH" stop; fi
+  sched_del "$ZRAM_UNIT"
+  rm -f "$ZRAM_CONF" "$ZRAM_SH"
+  ok "zram 已关闭"
+}
+
+menu_zram() {
+  local c
+  while :; do
+    title "zram 内存压缩交换"
+    row "物理内存" "$(awk '/^MemTotal:/ { printf "%d MB", $2 / 1024 }' /proc/meminfo)"
+    if grep -q '^/dev/zram0 ' /proc/swaps 2>/dev/null; then
+      row "zram" "已启用 $(awk '$1 == "/dev/zram0" { printf "%d MB，已用 %d MB", $3 / 1024, $4 / 1024 }' /proc/swaps)，算法 $(sed -n 's/.*\[\(.*\)\].*/\1/p' /sys/block/zram0/comp_algorithm 2>/dev/null)"
+    else
+      row "zram" "未启用"
+    fi
+    row "全部 swap" "$(awk '/^SwapTotal:/ { t = $2 } /^SwapFree:/ { f = $2 } END { printf "%d MB，已用 %d MB", t / 1024, (t - f) / 1024 }' /proc/meminfo)"
+    hr
+    item 1 "开启 / 调整大小"
+    item 2 "关闭并移除"
+    item 0 "返回"
+    read_choice c
+    case $c in
+      1) zram_on; pause ;;
+      2) zram_off; pause ;;
+      *) return ;;
+    esac
+  done
+}
+
+# ================================================================== 时间同步（chrony）
+NTP_CN=(ntp.aliyun.com ntp.tencent.com cn.pool.ntp.org)
+
+chrony_conf() { if [[ -f /etc/chrony/chrony.conf ]]; then echo /etc/chrony/chrony.conf; else echo /etc/chrony.conf; fi; }
+
+chrony_svc() {
+  local s
+  for s in chrony chronyd; do
+    if has systemctl && systemctl list-unit-files "$s.service" 2>/dev/null | grep -q "^$s.service"; then echo "$s"; return 0; fi
+    if [[ -f /etc/init.d/$s ]]; then echo "$s"; return 0; fi
+  done
+  echo chronyd
+}
+
+chrony_running() { has chronyc && chronyc -n tracking >/dev/null 2>&1; }
+
+timesync_on() {
+  local conf svc s
+  if [[ $(virt_type) =~ ^(openvz|lxc)$ ]]; then warn "容器的时间跟随宿主机，不需要也不能自己同步"; return 0; fi
+  if ! has chronyd; then
+    info "安装 chrony ..."
+    pkg_install chrony >/dev/null 2>&1
+    has chronyd || { err "安装 chrony 失败"; return 1; }
+  fi
+  conf=$(chrony_conf)
+  [[ -f $conf ]] || : >"$conf"
+  sed -i "/^$SSH_BEGIN\$/,/^$SSH_END\$/d" "$conf"
+  if in_china; then
+    {
+      echo "$SSH_BEGIN"
+      for s in "${NTP_CN[@]}"; do echo "server $s iburst"; done
+      echo "$SSH_END"
+    } >>"$conf"
+    info "服务器在国内，已加入 ${NTP_CN[*]}"
+  fi
+  svc=$(chrony_svc)
+  if has systemctl && [[ -d /run/systemd/system ]]; then
+    systemctl disable --now systemd-timesyncd >/dev/null 2>&1
+    systemctl enable "$svc" >/dev/null 2>&1
+    systemctl restart "$svc" || { err "chrony 启动失败（journalctl -u $svc 查看原因）"; return 1; }
+  elif has rc-service; then
+    rc-update add "$svc" default >/dev/null 2>&1
+    rc-service "$svc" restart >/dev/null 2>&1 || { err "chrony 启动失败"; return 1; }
+  else
+    chronyd >/dev/null 2>&1 || true
+  fi
+  sleep 3
+  chronyc -a makestep >/dev/null 2>&1
+  ok "chrony 已启用并立即对时，开机自启"
+}
+
+timesync_off() {
+  local svc conf
+  svc=$(chrony_svc)
+  conf=$(chrony_conf)
+  if has systemctl && [[ -d /run/systemd/system ]]; then
+    systemctl disable --now "$svc" >/dev/null 2>&1
+    if systemctl list-unit-files systemd-timesyncd.service 2>/dev/null | grep -q '^systemd-timesyncd'; then
+      systemctl enable --now systemd-timesyncd >/dev/null 2>&1 && info "已恢复系统自带的 systemd-timesyncd"
+    fi
+  elif has rc-service; then
+    rc-service "$svc" stop >/dev/null 2>&1
+    rc-update del "$svc" default >/dev/null 2>&1
+  fi
+  if [[ -f $conf ]]; then sed -i "/^$SSH_BEGIN\$/,/^$SSH_END\$/d" "$conf"; fi
+  ok "chrony 已停用"
+}
+
+menu_timesync() {
+  local c
+  while :; do
+    title "时间同步（chrony）"
+    row "当前时间" "$(date '+%F %T %Z')"
+    if chrony_running; then
+      row "chrony" "运行中，上游 $(chronyc -n tracking | awk -F': *' '/^Reference ID/ { print $2 }')"
+      row "偏差" "$(chronyc -n tracking | awk -F': *' '/^System time/ { print $2 }')"
+    elif has timedatectl; then
+      row "同步状态" "$(timedatectl show -p NTPSynchronized --value 2>/dev/null | sed 's/yes/已同步/;s/no/未同步/')（chrony 未运行）"
+    else
+      row "chrony" "未运行"
+    fi
+    hr
+    item 1 "安装 / 启用 chrony 并立即对时（国内自动用阿里云、腾讯云 NTP）"
+    item 2 "立即对时一次"
+    item 3 "查看时间源"
+    item 4 "停用 chrony"
+    item 0 "返回"
+    read_choice c
+    case $c in
+      1) timesync_on; pause ;;
+      2)
+        if chrony_running; then chronyc -a makestep && ok "已对时：$(date '+%F %T')"; else err "chrony 没有运行，先选 1"; fi
+        pause ;;
+      3) if chrony_running; then chronyc -n sources -v; else err "chrony 没有运行"; fi; pause ;;
+      4) timesync_off; pause ;;
+      *) return ;;
+    esac
+  done
+}
+
+# ================================================================== 自动安全更新
+AU_APT=/etc/apt/apt.conf.d/20auto-upgrades
+AU_APT_REBOOT=/etc/apt/apt.conf.d/52nx-auto-reboot
+AU_DNF_CONF=/etc/dnf/automatic.conf
+
+au_dnf_timer() { if dnf --version 2>/dev/null | grep -qi '^dnf5'; then echo dnf5-automatic.timer; else echo dnf-automatic.timer; fi; }
+
+autoupd_status() {
+  case $(pkg_mgr) in
+    apt-get)
+      if pkg_installed unattended-upgrades && [[ $(apt-config dump 2>/dev/null | awk -F'"' '/^APT::Periodic::Unattended-Upgrade / { print $2 }') == 1 ]]; then
+        echo "已开启（unattended-upgrades，每天自动装安全更新$([[ -f $AU_APT_REBOOT ]] && echo "，需要时 04:00 自动重启")）"
+      else
+        echo "未开启"
+      fi ;;
+    dnf)
+      if systemctl is-enabled -q "$(au_dnf_timer)" 2>/dev/null; then echo "已开启（dnf-automatic，每天自动装安全更新）"; else echo "未开启"; fi ;;
+    *) echo "当前系统不支持" ;;
+  esac
+}
+
+autoupd_on() {
+  local pkg timer
+  case $(pkg_mgr) in
+    apt-get)
+      info "安装 unattended-upgrades ..."
+      pkg_install unattended-upgrades >/dev/null 2>&1
+      pkg_installed unattended-upgrades || { err "安装 unattended-upgrades 失败"; return 1; }
+      printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n' >"$AU_APT"
+      if confirm_opt "安全更新需要重启时，自动在凌晨 4 点重启?" N; then
+        printf 'Unattended-Upgrade::Automatic-Reboot "true";\nUnattended-Upgrade::Automatic-Reboot-Time "04:00";\n' >"$AU_APT_REBOOT"
+      else
+        rm -f "$AU_APT_REBOOT"
+      fi
+      if has systemctl; then systemctl enable --now unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1; fi
+      ok "已开启：每天自动安装安全更新（按系统默认规则：Ubuntu 只装安全更新，Debian 另含稳定版的小版本修复；都不会跨大版本升级）" ;;
+    dnf)
+      pkg=dnf-automatic
+      timer=$(au_dnf_timer)
+      [[ $timer == dnf5-* ]] && pkg=dnf5-plugin-automatic
+      info "安装 $pkg ..."
+      pkg_install "$pkg" >/dev/null 2>&1
+      pkg_installed "$pkg" || { err "安装 $pkg 失败"; return 1; }
+      ini_set "$AU_DNF_CONF" commands upgrade_type security
+      ini_set "$AU_DNF_CONF" commands apply_updates yes
+      systemctl enable --now "$timer" >/dev/null 2>&1 || { err "启用 $timer 失败"; return 1; }
+      ok "已开启：每天自动安装安全更新（$timer）" ;;
+    *) err "当前系统（$(pkg_mgr)）暂不支持自动安全更新"; return 1 ;;
+  esac
+}
+
+autoupd_off() {
+  case $(pkg_mgr) in
+    apt-get)
+      [[ -f $AU_APT ]] && printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "0";\n' >"$AU_APT"
+      rm -f "$AU_APT_REBOOT" ;;
+    dnf) systemctl disable --now "$(au_dnf_timer)" >/dev/null 2>&1 ;;
+    *) return 0 ;;
+  esac
+  ok "已关闭自动安全更新"
+}
+
+menu_autoupd() {
+  local c
+  while :; do
+    title "自动安全更新"
+    row "状态" "$(autoupd_status)"
+    hr
+    item 1 "开启（Debian/Ubuntu 用 unattended-upgrades，RHEL 系用 dnf-automatic）"
+    item 2 "关闭"
+    item 0 "返回"
+    read_choice c
+    case $c in
+      1) autoupd_on; pause ;;
+      2) autoupd_off; pause ;;
+      *) return ;;
+    esac
+  done
+}
+
+# ================================================================== KEY=VALUE 配置文件
+# kv_load 文件 键...：把文件里的 KEY=VALUE 读进同名变量（只认列出的键，不执行文件内容）
+# 调用方先用 local 声明这些变量，变量名不要用 __kf __kk __kv
+kv_load() {
+  local __kf=$1 __kk __kv
+  shift
+  [[ -f $__kf ]] || return 0
+  while IFS='=' read -r __kk __kv || [[ -n $__kk ]]; do
+    if [[ " $* " == *" $__kk "* ]]; then printf -v "$__kk" '%s' "$__kv"; fi
+  done <"$__kf"
+}
+
+# kv_save 文件 键...：把同名变量写成 KEY=VALUE，整个替换，权限 600
+kv_save() {
+  local __kf=$1 __kk
+  shift
+  mkdir -p "$(dirname "$__kf")"
+  (
+    umask 077
+    for __kk in "$@"; do printf '%s=%s\n' "$__kk" "${!__kk}"; done >"$__kf.nx"
+  ) && mv -f "$__kf.nx" "$__kf"
+}
+
+# ================================================================== 月流量统计 / 超额动作
+TR_CONF="$NX_DIR/traffic.conf"
+TR_STATE="$NX_DIR/traffic.state"
+TR_HIST="$NX_DIR/traffic.history"
+TR_CONF_KEYS=(TR_ON IFACE RESET_DAY QUOTA_GB MODE ACTION LIMIT_MBIT WARN_PCT)
+TR_STATE_KEYS=(PERIOD RX TX LAST_RX LAST_TX BOOT DONE WARNED CAL)
+TR_HANDLE=ffd0
+TR_PRIO=49
+MON_UNIT=nx-monitor
+GIB=1073741824
+
+# NX_NOW / NX_NETDEV / NX_BOOT_ID 可替换时间和计数来源（测试用）
+tr_now() { echo "${NX_NOW:-$(date +%s)}"; }
+tr_boot_id() { cat "${NX_BOOT_ID:-/proc/sys/kernel/random/boot_id}" 2>/dev/null; }
+
+# tr_iface 配置值：auto 时取默认路由的网卡，没有 IPv4 路由就看 IPv6
+tr_iface() {
+  if [[ -n ${1:-} && $1 != auto ]]; then echo "$1"; return; fi
+  { ip -4 route get 1.1.1.1 2>/dev/null || ip -6 route get 2606:4700:4700::1111 2>/dev/null; } |
+    awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }'
+}
+
+# tr_counters 网卡：开机以来的收、发字节数
+tr_counters() {
+  awk -v i="$1" '{ sub(/^[ \t]+/, ""); n = index($0, ":"); if (n == 0 || substr($0, 1, n - 1) != i) next
+    $0 = substr($0, n + 1); print $1, $9; exit }' "${NX_NETDEV:-/proc/net/dev}"
+}
+
+# tr_period 时间戳 重置日：当前计费周期的起始日期
+tr_period() {
+  local y m d
+  read -r y m d < <(date -d "@$1" '+%Y %m %d')
+  y=$((10#$y)) m=$((10#$m)) d=$((10#$d))
+  if (( d < $2 )); then
+    m=$((m - 1))
+    if (( m == 0 )); then m=12 y=$((y - 1)); fi
+  fi
+  printf '%04d-%02d-%02d\n' "$y" "$m" "$2"
+}
+
+# tr_used 计费方式 收 发 校准值：both 双向相加，out 只算出站，in 只算入站，max 取大的一边
+tr_used() {
+  local u
+  case $1 in
+    out) u=$3 ;;
+    in) u=$2 ;;
+    max) u=$(( $2 > $3 ? $2 : $3 )) ;;
+    *) u=$(( $2 + $3 )) ;;
+  esac
+  u=$(( u + ${4:-0} ))
+  echo $(( u < 0 ? 0 : u ))
+}
+
+tr_mode_name() {
+  case $1 in out) echo "只算出站" ;; in) echo "只算入站" ;; max) echo "出站入站取大的一边" ;; *) echo "出站+入站" ;; esac
+}
+
+tr_limit_active() { tc qdisc show dev "$1" 2>/dev/null | grep -q "qdisc tbf $TR_HANDLE: root"; }
+
+# 超额限速：出口用 tbf，入口用 police 丢包；网卡上已有 HTB（vps-PSL 等）时不覆盖
+tr_limit_on() {
+  local dev=$1 mbit=$2 b
+  has tc || pkg_install iproute2 >/dev/null 2>&1
+  if tc qdisc show dev "$dev" 2>/dev/null | grep -q '^qdisc htb [0-9a-f]*: root'; then
+    warn "$dev 上已有 HTB 限速规则（vps-PSL 等），超额限速不覆盖它"
+    return 1
+  fi
+  b=$(( mbit * 1250 )); (( b < 32768 )) && b=32768
+  tc qdisc replace dev "$dev" root handle "$TR_HANDLE:" tbf rate "${mbit}mbit" burst "$b" latency 200ms || return 1
+  if ! tc qdisc show dev "$dev" 2>/dev/null | grep -q '^qdisc ingress ffff:'; then
+    tc qdisc add dev "$dev" handle ffff: ingress || return 1
+  fi
+  b=$(( mbit * 6250 )); (( b < 65536 )) && b=65536
+  tc filter del dev "$dev" parent ffff: protocol all prio "$TR_PRIO" >/dev/null 2>&1
+  tc filter add dev "$dev" parent ffff: protocol all prio "$TR_PRIO" u32 match u32 0 0 \
+    police rate "${mbit}mbit" burst "$b" drop flowid :1
+}
+
+tr_limit_off() {
+  local dev=$1
+  if tr_limit_active "$dev"; then tc qdisc del dev "$dev" root >/dev/null 2>&1; fi
+  tc filter del dev "$dev" parent ffff: protocol all prio "$TR_PRIO" >/dev/null 2>&1
+  if tc qdisc show dev "$dev" 2>/dev/null | grep -q '^qdisc ingress ffff:' && [[ -z $(tc filter show dev "$dev" parent ffff: 2>/dev/null) ]]; then
+    tc qdisc del dev "$dev" ingress >/dev/null 2>&1
+  fi
+  return 0
+}
+
+# tr_over 网卡 动作 限速值 已用字节
+tr_over() {
+  local msg
+  msg="本期流量已超额（已用 $(fmt_bytes "$4")）"
+  case $2 in
+    limit)
+      if tr_limit_on "$1" "$3" >/dev/null 2>&1; then msg+="，已限速到 $3 Mbit/s，下个周期自动解除"
+      else msg+="，但限速没有生效（网卡上已有其他限速规则）"; fi
+      tg_notify traffic "$msg" ;;
+    shutdown)
+      tg_notify traffic "$msg，1 分钟后关机；本周期内再开机不会再自动关机"
+      if has shutdown; then shutdown -h +1 "nx: 月流量超额，自动关机" >/dev/null 2>&1; else sleep 60; poweroff; fi ;;
+    *) tg_notify traffic "$msg" ;;
+  esac
+}
+
+traffic_tick() {
+  local TR_ON=0 IFACE=auto RESET_DAY=1 QUOTA_GB=0 MODE=both ACTION=none LIMIT_MBIT=1 WARN_PCT=80
+  local PERIOD="" RX=0 TX=0 LAST_RX=0 LAST_TX=0 BOOT="" DONE=0 WARNED=0 CAL=0
+  local now dev rx tx boot period used quota pct want=0
+  kv_load "$TR_CONF" "${TR_CONF_KEYS[@]}"
+  [[ $TR_ON == 1 ]] || return 0
+  kv_load "$TR_STATE" "${TR_STATE_KEYS[@]}"
+  now=$(tr_now)
+  dev=$(tr_iface "$IFACE")
+  [[ -n $dev ]] || return 1
+  read -r rx tx < <(tr_counters "$dev")
+  is_uint "${tx:-}" || return 1
+  boot=$(tr_boot_id)
+  period=$(tr_period "$now" "$RESET_DAY")
+  if [[ $period != "$PERIOD" ]]; then
+    if [[ -n $PERIOD ]]; then
+      echo "$PERIOD $RX $TX $(tr_used "$MODE" "$RX" "$TX" "$CAL")" >>"$TR_HIST"
+      if [[ $DONE == 1 && $ACTION == limit ]]; then tg_notify traffic "新的计费周期开始，已解除超额限速"; fi
+    fi
+    PERIOD=$period RX=0 TX=0 DONE=0 WARNED=0 CAL=0
+  fi
+  # 第一次只记基线；重启后（boot_id 变了）或计数变小（网卡重建）时计数从 0 重来，整段计入
+  if [[ -n $BOOT ]]; then
+    if [[ $boot != "$BOOT" ]]; then LAST_RX=0 LAST_TX=0; fi
+    if (( rx >= LAST_RX )); then RX=$(( RX + rx - LAST_RX )); else RX=$(( RX + rx )); fi
+    if (( tx >= LAST_TX )); then TX=$(( TX + tx - LAST_TX )); else TX=$(( TX + tx )); fi
+  fi
+  LAST_RX=$rx LAST_TX=$tx BOOT=$boot
+  if (( QUOTA_GB > 0 )); then
+    quota=$(( QUOTA_GB * GIB ))
+    used=$(tr_used "$MODE" "$RX" "$TX" "$CAL")
+    pct=$(( used * 100 / quota ))
+    if (( pct < WARN_PCT )); then
+      WARNED=0
+    elif (( WARN_PCT > 0 && WARNED == 0 )); then
+      WARNED=1
+      if (( used < quota )); then tg_notify traffic "本期流量已用 ${pct}%（$(fmt_bytes "$used") / ${QUOTA_GB}GB）"; fi
+    fi
+    if (( used < quota )); then
+      DONE=0
+    elif [[ $DONE == 0 ]]; then
+      DONE=1
+      kv_save "$TR_STATE" "${TR_STATE_KEYS[@]}"
+      tr_over "$dev" "$ACTION" "$LIMIT_MBIT" "$used"
+    fi
+    if [[ $DONE == 1 && $ACTION == limit ]]; then want=1; fi
+  fi
+  if (( want )) && ! tr_limit_active "$dev"; then tr_limit_on "$dev" "$LIMIT_MBIT" >/dev/null 2>&1; fi
+  if (( ! want )) && tr_limit_active "$dev"; then tr_limit_off "$dev"; fi
+  kv_save "$TR_STATE" "${TR_STATE_KEYS[@]}"
+}
+
+traffic_status() {
+  local TR_ON=0 IFACE=auto RESET_DAY=1 QUOTA_GB=0 MODE=both ACTION=none LIMIT_MBIT=1 WARN_PCT=80
+  local PERIOD="" RX=0 TX=0 LAST_RX=0 LAST_TX=0 BOOT="" DONE=0 WARNED=0 CAL=0
+  local dev used act p r t u
+  kv_load "$TR_CONF" "${TR_CONF_KEYS[@]}"
+  if [[ $TR_ON != 1 ]]; then row "状态" "未开启"; return 0; fi
+  kv_load "$TR_STATE" "${TR_STATE_KEYS[@]}"
+  dev=$(tr_iface "$IFACE")
+  used=$(tr_used "$MODE" "$RX" "$TX" "$CAL")
+  row "统计网卡" "${dev:-未找到}$([[ $IFACE == auto ]] && echo "（自动）")"
+  row "计费周期" "${PERIOD:-等待首次统计} 起，每月 $RESET_DAY 号重置"
+  row "本期入站" "$(fmt_bytes "$RX")"
+  row "本期出站" "$(fmt_bytes "$TX")"
+  row "计费方式" "$(tr_mode_name "$MODE")$([[ $CAL != 0 ]] && echo "（已校准）")"
+  if (( QUOTA_GB > 0 )); then
+    row "已用 / 配额" "$(fmt_bytes "$used") / ${QUOTA_GB}GB（$(( used * 100 / (QUOTA_GB * GIB) ))%）"
+    case $ACTION in limit) act="限速到 $LIMIT_MBIT Mbit/s" ;; shutdown) act="关机" ;; *) act="只提醒" ;; esac
+    row "超额后" "$act"
+    case $DONE in 1) row "当前" "${C_RED}已超额${C_RST}$(tr_limit_active "$dev" && echo "，限速中")" ;; 2) row "当前" "已超额，已手动解除" ;; esac
+  else
+    row "配额" "不限（只统计）"
+  fi
+  if [[ -s $TR_HIST ]]; then
+    printf '  %s历史周期（起始日 / 入站 / 出站 / 计费用量）%s\n' "$C_GRY" "$C_RST"
+    while read -r p r t u; do
+      printf '    %s  %10s  %10s  %10s\n' "$p" "$(fmt_bytes "$r")" "$(fmt_bytes "$t")" "$(fmt_bytes "$u")"
+    done < <(tail -n 6 "$TR_HIST")
+  fi
+}
+
+traffic_setup() {
+  local TR_ON=0 IFACE=auto RESET_DAY=1 QUOTA_GB=0 MODE=both ACTION=none LIMIT_MBIT=1 WARN_PCT=80
+  local old_if v dev
+  kv_load "$TR_CONF" "${TR_CONF_KEYS[@]}"
+  old_if=$IFACE
+  ask IFACE "统计哪个网卡（auto = 默认路由的网卡，当前是 $(tr_iface auto)）" "$IFACE" || return 1
+  if [[ $IFACE != auto && ! -e /sys/class/net/$IFACE ]]; then err "网卡 $IFACE 不存在"; return 1; fi
+  ask RESET_DAY "每月几号重置（1-28，按服务商的账单日）" "$RESET_DAY" || return 1
+  if ! is_uint "$RESET_DAY" || (( RESET_DAY < 1 || RESET_DAY > 28 )); then err "重置日要在 1-28 之间"; return 1; fi
+  echo "  计费方式：1) 出站+入站  2) 只算出站  3) 只算入站  4) 取出站入站里大的一边"
+  case $MODE in out) v=2 ;; in) v=3 ;; max) v=4 ;; *) v=1 ;; esac
+  ask v "选择" "$v" || return 1
+  case $v in 1) MODE=both ;; 2) MODE=out ;; 3) MODE=in ;; 4) MODE=max ;; *) err "无效选择"; return 1 ;; esac
+  ask v "每月配额（GB，可写 2T；1GB = 1024³ 字节；0 = 只统计不设上限）" "$QUOTA_GB" || return 1
+  QUOTA_GB=$(traffic_gb "$v") || { err "配额格式无效：$v（如 500、500G、2T）"; return 1; }
+  if (( QUOTA_GB > 0 )); then
+    echo "  超额后：1) 只提醒  2) 限速（下个周期自动解除）  3) 关机"
+    case $ACTION in limit) v=2 ;; shutdown) v=3 ;; *) v=1 ;; esac
+    ask v "选择" "$v" || return 1
+    case $v in
+      1) ACTION=none ;;
+      2)
+        ACTION=limit
+        ask LIMIT_MBIT "限速到多少 Mbit/s（出站入站都限）" "$LIMIT_MBIT" || return 1
+        if ! is_uint "$LIMIT_MBIT" || (( LIMIT_MBIT < 1 )); then err "限速值要是正整数"; return 1; fi ;;
+      3)
+        warn "超额后会自动关机，要到服务商面板开机；同一个计费周期内开机后不会再次关机"
+        confirm "确定超额后关机?" N || return 1
+        ACTION=shutdown ;;
+      *) err "无效选择"; return 1 ;;
+    esac
+    ask WARN_PCT "用到百分之多少时先提醒一次（0 = 不提醒；提醒走 Telegram 通知）" "$WARN_PCT" || return 1
+    if ! is_uint "$WARN_PCT" || (( WARN_PCT > 99 )); then err "提醒百分比要在 0-99 之间"; return 1; fi
+  fi
+  TR_ON=1
+  kv_save "$TR_CONF" "${TR_CONF_KEYS[@]}"
+  dev=$(tr_iface "$old_if")
+  if tr_limit_active "$dev"; then tr_limit_off "$dev"; fi
+  if [[ $IFACE != "$old_if" ]]; then traffic_rebase; fi
+  monitor_sync
+  monitor_tick
+  ok "月流量统计已开启，每分钟更新一次"
+  if (( QUOTA_GB > 0 )) && ! tg_ready; then info "配好「Telegram 通知」后，快用完和超额时会发消息给你"; fi
+}
+
+# 换网卡后重新取基线，已累计的用量保留
+traffic_rebase() {
+  local PERIOD="" RX=0 TX=0 LAST_RX=0 LAST_TX=0 BOOT="" DONE=0 WARNED=0 CAL=0
+  [[ -f $TR_STATE ]] || return 0
+  kv_load "$TR_STATE" "${TR_STATE_KEYS[@]}"
+  BOOT=""
+  kv_save "$TR_STATE" "${TR_STATE_KEYS[@]}"
+}
+
+traffic_calibrate() {
+  local TR_ON=0 MODE=both
+  local PERIOD="" RX=0 TX=0 LAST_RX=0 LAST_TX=0 BOOT="" DONE=0 WARNED=0 CAL=0
+  local v target
+  kv_load "$TR_CONF" TR_ON MODE
+  [[ $TR_ON == 1 && -f $TR_STATE ]] || { err "还没有开启流量统计"; return 1; }
+  kv_load "$TR_STATE" "${TR_STATE_KEYS[@]}"
+  info "当前统计的本期用量：$(fmt_bytes "$(tr_used "$MODE" "$RX" "$TX" "$CAL")")"
+  ask v "服务商面板显示本期已用多少 GB（可带小数）" "" || return 1
+  [[ $v =~ ^[0-9]+([.][0-9]+)?$ ]] || { err "格式不对：$v"; return 1; }
+  target=$(awk -v g="$v" -v u="$GIB" 'BEGIN { printf "%.0f", g * u }')
+  CAL=$(( target - $(tr_used "$MODE" "$RX" "$TX" 0) ))
+  kv_save "$TR_STATE" "${TR_STATE_KEYS[@]}"
+  ok "已校准为 $(fmt_bytes "$target")，之后在此基础上累计（下个周期自动清掉校准值）"
+}
+
+traffic_release() {
+  local IFACE=auto
+  local PERIOD="" RX=0 TX=0 LAST_RX=0 LAST_TX=0 BOOT="" DONE=0 WARNED=0 CAL=0
+  kv_load "$TR_CONF" IFACE
+  kv_load "$TR_STATE" "${TR_STATE_KEYS[@]}"
+  if [[ $DONE != 1 ]]; then info "本期没有触发超额动作"; return 0; fi
+  DONE=2
+  kv_save "$TR_STATE" "${TR_STATE_KEYS[@]}"
+  tr_limit_off "$(tr_iface "$IFACE")"
+  ok "已解除，本计费周期内不再自动限速"
+}
+
+traffic_off() {
+  local TR_ON=0 IFACE=auto RESET_DAY=1 QUOTA_GB=0 MODE=both ACTION=none LIMIT_MBIT=1 WARN_PCT=80
+  kv_load "$TR_CONF" "${TR_CONF_KEYS[@]}"
+  [[ $TR_ON == 1 ]] || { info "流量统计本来就没开"; return 0; }
+  tr_limit_off "$(tr_iface "$IFACE")"
+  TR_ON=0
+  kv_save "$TR_CONF" "${TR_CONF_KEYS[@]}"
+  monitor_sync
+  ok "已关闭月流量统计（已统计的数据保留，重新开启接着算）"
+}
+
+# 卸载用：撤掉限速并删掉全部数据
+traffic_purge() {
+  local IFACE=auto
+  kv_load "$TR_CONF" IFACE
+  if [[ -f $TR_CONF ]]; then tr_limit_off "$(tr_iface "$IFACE")"; fi
+  rm -f "$TR_CONF" "$TR_STATE" "$TR_HIST"
+}
+
+menu_traffic() {
+  local c
+  while :; do
+    title "月流量统计 / 超额限速"
+    traffic_status
+    hr
+    item2 1 "开启 / 修改设置" 2 "按服务商面板校准用量"
+    item2 3 "手动解除本期限速" 4 "关闭统计"
+    item 0 "返回"
+    read_choice c
+    case $c in
+      1) traffic_setup; pause ;;
+      2) traffic_calibrate; pause ;;
+      3) traffic_release; pause ;;
+      4) traffic_off; pause ;;
+      0) return ;;
+    esac
+  done
+}
+
+# ================================================================== Telegram 通知
+TG_CONF="$NX_DIR/tg.conf"
+TG_KEYS=(TG_TOKEN TG_CHAT TG_API TG_NAME TG_LOGIN TG_BOOT TG_RES TG_TRAFFIC CPU_PCT MEM_PCT DISK_PCT)
+TG_LOGIN_SH=/usr/local/sbin/nx-tg-login
+TG_PAM=/etc/pam.d/sshd
+TG_BOOT_UNIT=nx-tg-boot
+MON_STATE="$NX_DIR/monitor.state"
+MON_KEYS=(C_IDLE C_TOTAL N_CPU N_MEM N_DISK A_CPU A_MEM A_DISK)
+
+# tg_api 方法 token API地址 [curl 参数...]：token 经 curl -K - 从标准输入传，不出现在进程列表里
+tg_api() {
+  local m=$1 tok=$2 api=${3:-https://api.telegram.org}
+  shift 3
+  printf 'url = "%s/bot%s/%s"\n' "${api%/}" "$tok" "$m" | curl -fsS -m 15 -K - "$@"
+}
+
+tg_ready() {
+  local TG_TOKEN="" TG_CHAT=""
+  kv_load "$TG_CONF" TG_TOKEN TG_CHAT
+  [[ -n $TG_TOKEN && -n $TG_CHAT ]]
+}
+
+tg_send() {
+  local TG_TOKEN="" TG_CHAT="" TG_API="" TG_NAME=""
+  kv_load "$TG_CONF" TG_TOKEN TG_CHAT TG_API TG_NAME
+  [[ -n $TG_TOKEN && -n $TG_CHAT ]] || return 1
+  tg_api sendMessage "$TG_TOKEN" "$TG_API" --retry 2 -o /dev/null \
+    --data-urlencode "chat_id=$TG_CHAT" --data-urlencode "text=[${TG_NAME:-$(hostname)}] $1"
+}
+
+# tg_notify 类别 文本：按类别开关决定发不发；没配 Telegram 时什么也不做
+tg_notify() {
+  local TG_LOGIN=1 TG_BOOT=1 TG_RES=1 TG_TRAFFIC=1 sw=1
+  tg_ready || return 0
+  kv_load "$TG_CONF" TG_LOGIN TG_BOOT TG_RES TG_TRAFFIC
+  case $1 in
+    login) sw=$TG_LOGIN ;;
+    boot) sw=$TG_BOOT ;;
+    res) sw=$TG_RES ;;
+    traffic) sw=$TG_TRAFFIC ;;
+  esac
+  [[ $sw == 1 ]] || return 0
+  tg_send "$2" >/dev/null 2>&1
+}
+
+# tg_detect_chat API地址 token：取最近一条发给机器人的消息所在的 chat id
+tg_detect_chat() {
+  tg_api getUpdates "$2" "$1" 2>/dev/null | grep -oE '"chat":[[:space:]]*\{[[:space:]]*"id":[[:space:]]*-?[0-9]+' | tail -n 1 | grep -oE -- '-?[0-9]+$'
+}
+
+tg_pam_on() {
+  if [[ ! -f $TG_PAM ]]; then warn "没有 $TG_PAM，这个系统用不了 SSH 登录通知"; return 1; fi
+  mkdir -p "$(dirname "$TG_LOGIN_SH")"
+  cat >"$TG_LOGIN_SH" <<EOF
+#!/bin/bash
+# NX 工具箱：sshd 的 pam_exec 在登录时调用，放到后台发送，不拖慢登录
+[[ \${PAM_TYPE:-} == open_session ]] || exit 0
+( $NX_BIN tg login "\${PAM_USER:-?}" "\${PAM_RHOST:-?}" </dev/null >/dev/null 2>&1 & )
+exit 0
+EOF
+  chmod 755 "$TG_LOGIN_SH"
+  grep -qF "$TG_LOGIN_SH" "$TG_PAM" || echo "session optional pam_exec.so quiet $TG_LOGIN_SH" >>"$TG_PAM"
+  if [[ $(sshd_effective UsePAM) != yes ]]; then warn "sshd 没有开启 UsePAM，SSH 登录通知不会触发"; fi
+  return 0
+}
+
+tg_pam_off() {
+  if [[ -f $TG_PAM ]]; then sed -i "\|$TG_LOGIN_SH|d" "$TG_PAM"; fi
+  rm -f "$TG_LOGIN_SH"
+}
+
+# 按开关装好或撤掉：SSH 登录钩子、开机通知、每分钟的监控定时器
+tg_apply() {
+  local TG_LOGIN=0 TG_BOOT=0
+  if tg_ready; then kv_load "$TG_CONF" TG_LOGIN TG_BOOT; fi
+  [[ -x $NX_BIN ]] || self_install >/dev/null 2>&1
+  if [[ $TG_LOGIN == 1 ]]; then tg_pam_on; else tg_pam_off; fi
+  if [[ $TG_BOOT == 1 ]]; then
+    sched_set "$TG_BOOT_UNIT" boot "$NX_BIN tg boot" "nx: Telegram 开机通知"
+  else
+    sched_del "$TG_BOOT_UNIT"
+  fi
+  monitor_sync
+}
+
+tg_setup() {
+  local TG_TOKEN="" TG_CHAT="" TG_API="" TG_NAME="" TG_LOGIN=1 TG_BOOT=1 TG_RES=1 TG_TRAFFIC=1 CPU_PCT=90 MEM_PCT=90 DISK_PCT=90
+  local t chat
+  kv_load "$TG_CONF" "${TG_KEYS[@]}"
+  info "先在 Telegram 里找 @BotFather 发 /newbot 建一个机器人，拿到它的 token"
+  ask_secret t "机器人 token$([[ -n $TG_TOKEN ]] && echo "（直接回车沿用已保存的）")" || return 1
+  [[ -n $t ]] && TG_TOKEN=$t
+  [[ $TG_TOKEN =~ ^[0-9]+:[A-Za-z0-9_-]{20,}$ ]] || { err "token 格式不对（应为 数字:字母数字）"; return 1; }
+  ask TG_API "Bot API 地址（国内机器可填自己的反代地址）" "${TG_API:-https://api.telegram.org}" || return 1
+  [[ $TG_API =~ ^https?://[^[:space:]\"]+$ ]] || { err "地址格式不对：$TG_API"; return 1; }
+  if [[ -z $TG_CHAT ]]; then
+    info "现在用 Telegram 给这个机器人发一条任意消息（发到群里就把机器人拉进群再在群里发一条），发完回车"
+    pause
+    chat=$(tg_detect_chat "$TG_API" "$TG_TOKEN")
+    if [[ -n $chat ]]; then info "找到 chat id：$chat"; else warn "没读到消息，请手工填写 chat id"; fi
+    TG_CHAT=$chat
+  fi
+  ask TG_CHAT "接收通知的 chat id" "$TG_CHAT" || return 1
+  [[ $TG_CHAT =~ ^-?[0-9]+$|^@[A-Za-z0-9_]{5,}$ ]] || { err "chat id 格式不对：$TG_CHAT"; return 1; }
+  ask TG_NAME "通知里显示的服务器名字" "${TG_NAME:-$(hostname)}" || return 1
+  TG_NAME=${TG_NAME//[$'\n\r']/}
+  info "发送测试消息..."
+  if ! tg_api sendMessage "$TG_TOKEN" "$TG_API" -o /dev/null --data-urlencode "chat_id=$TG_CHAT" \
+    --data-urlencode "text=[$TG_NAME] NX 工具箱 Telegram 通知已连通"; then
+    err "发送失败：检查 token 和 chat id，以及这台机器能否访问 $TG_API"
+    return 1
+  fi
+  ok "测试消息已发送，请在 Telegram 里查看"
+  if confirm_opt "SSH 登录时通知?" Y; then TG_LOGIN=1; else TG_LOGIN=0; fi
+  if confirm_opt "开机时通知?" Y; then TG_BOOT=1; else TG_BOOT=0; fi
+  if confirm_opt "CPU / 内存 / 系统盘占用过高时告警（阈值默认 90%）?" Y; then TG_RES=1; else TG_RES=0; fi
+  if confirm_opt "月流量快用完 / 超额时通知?" Y; then TG_TRAFFIC=1; else TG_TRAFFIC=0; fi
+  kv_save "$TG_CONF" "${TG_KEYS[@]}"
+  tg_apply
+  ok "Telegram 通知已配置（配置文件 $TG_CONF，只有 root 可读）"
+}
+
+tg_thresholds() {
+  local TG_TOKEN="" TG_CHAT="" TG_API="" TG_NAME="" TG_LOGIN=1 TG_BOOT=1 TG_RES=1 TG_TRAFFIC=1 CPU_PCT=90 MEM_PCT=90 DISK_PCT=90
+  local k t
+  kv_load "$TG_CONF" "${TG_KEYS[@]}"
+  for k in CPU_PCT MEM_PCT DISK_PCT; do
+    case $k in CPU_PCT) t="CPU 使用率（连续 5 分钟）" ;; MEM_PCT) t="内存使用率（连续 5 分钟）" ;; *) t="系统盘使用率" ;; esac
+    ask "$k" "$t 告警阈值 %（0 = 不告警）" "${!k}" || return 1
+    if ! is_uint "${!k}" || (( ${!k} > 100 )); then err "阈值要在 0-100 之间"; return 1; fi
+  done
+  if (( CPU_PCT + MEM_PCT + DISK_PCT > 0 )); then TG_RES=1; else TG_RES=0; fi
+  kv_save "$TG_CONF" "${TG_KEYS[@]}"
+  monitor_sync
+  ok "已保存"
+}
+
+# tg_toggle 键 说明
+tg_toggle() {
+  local TG_TOKEN="" TG_CHAT="" TG_API="" TG_NAME="" TG_LOGIN=1 TG_BOOT=1 TG_RES=1 TG_TRAFFIC=1 CPU_PCT=90 MEM_PCT=90 DISK_PCT=90
+  kv_load "$TG_CONF" "${TG_KEYS[@]}"
+  if [[ ${!1} == 1 ]]; then printf -v "$1" 0; else printf -v "$1" 1; fi
+  kv_save "$TG_CONF" "${TG_KEYS[@]}"
+  tg_apply
+  ok "$2已$([[ ${!1} == 1 ]] && echo 开启 || echo 关闭)"
+}
+
+tg_status() {
+  local TG_TOKEN="" TG_CHAT="" TG_API="" TG_NAME="" TG_LOGIN=1 TG_BOOT=1 TG_RES=1 TG_TRAFFIC=1 CPU_PCT=90 MEM_PCT=90 DISK_PCT=90
+  if ! tg_ready; then row "状态" "未配置"; return 0; fi
+  kv_load "$TG_CONF" "${TG_KEYS[@]}"
+  row "状态" "已配置（chat $TG_CHAT，名字 ${TG_NAME:-$(hostname)}）"
+  row "SSH 登录通知" "$(on_off "$TG_LOGIN")"
+  row "开机通知" "$(on_off "$TG_BOOT")"
+  row "资源告警" "$(on_off "$TG_RES")（CPU ${CPU_PCT}% / 内存 ${MEM_PCT}% / 系统盘 ${DISK_PCT}%）"
+  row "流量提醒" "$(on_off "$TG_TRAFFIC")"
+}
+
+on_off() { if [[ $1 == 1 ]]; then echo "${C_GRN}开${C_RST}"; else echo "关"; fi; }
+
+tg_boot() {
+  local ip
+  ip=$(public_ipv4 2>/dev/null)
+  for _ in 1 2 3 4 5 6; do
+    tg_notify boot "服务器已开机（${ip:-IP 未知}，$(date '+%F %T')）" && return 0
+    sleep 10
+  done
+}
+
+tg_purge() {
+  tg_pam_off
+  sched_del "$TG_BOOT_UNIT"
+  rm -f "$TG_CONF" "$MON_STATE"
+  monitor_sync
+}
+
+menu_tg() {
+  local c
+  while :; do
+    title "Telegram 通知"
+    tg_status
+    hr
+    item2 1 "配置机器人（修改也用这个）" 2 "发送测试消息"
+    item2 3 "SSH 登录通知 开/关" 4 "开机通知 开/关"
+    item2 5 "资源告警阈值" 6 "流量提醒 开/关"
+    item 7 "删除 Telegram 配置"
+    item 0 "返回"
+    read_choice c
+    case $c in
+      1) tg_setup; pause ;;
+      2) if tg_send "测试消息（$(date '+%F %T')）"; then ok "已发送"; else err "发送失败或还没配置"; fi; pause ;;
+      3|4|5|6|7)
+        if ! tg_ready; then err "请先配置机器人"; pause; continue; fi
+        case $c in
+          3) tg_toggle TG_LOGIN "SSH 登录通知" ;;
+          4) tg_toggle TG_BOOT "开机通知" ;;
+          5) tg_thresholds ;;
+          6) tg_toggle TG_TRAFFIC "流量提醒" ;;
+          7) confirm "删除 Telegram 配置并停掉全部通知?" N && tg_purge && ok "已删除" ;;
+        esac
+        pause ;;
+      0) return ;;
+    esac
+  done
+}
+
+tg_cli() {
+  case ${1:-} in
+    test) if tg_send "测试消息（$(date '+%F %T')）"; then ok "已发送"; else die "发送失败或还没配置（nx tg 进入菜单配置）"; fi ;;
+    send)
+      shift
+      [[ $# -gt 0 ]] || die "用法: nx tg send 文字"
+      tg_send "$*" || die "发送失败或还没配置" ;;
+    login) tg_notify login "SSH 登录：用户 ${2:-?}，来自 ${3:-?}（$(date '+%F %T')）" ;;
+    boot) tg_boot ;;
+    "") menu_tg ;;
+    *) die "未知子命令: $1（可用 test / send）" ;;
+  esac
+}
+
+# ================================================================== 每分钟监控（流量统计 + 资源告警共用）
+# res_check 名称 当前值 阈值 说明：CPU/内存连续 5 分钟超过才报，回落到阈值以下 10 个点再发恢复
+res_check() {
+  local n=N_$1 a=A_$1 need=5
+  [[ $1 == DISK ]] && need=1
+  (( $3 > 0 )) || { printf -v "$n" 0; printf -v "$a" 0; return 0; }
+  if (( $2 >= $3 )); then
+    printf -v "$n" '%s' $(( ${!n} + 1 ))
+    if (( ${!n} >= need && ${!a} == 0 )); then
+      printf -v "$a" 1
+      tg_notify res "$4达到 ${2}%（告警阈值 ${3}%）"
+    fi
+  else
+    printf -v "$n" 0
+    if (( ${!a} == 1 && $2 < $3 - 10 )); then
+      printf -v "$a" 0
+      tg_notify res "$4已回落到 ${2}%"
+    fi
+  fi
+}
+
+res_tick() {
+  local TG_RES=0 CPU_PCT=90 MEM_PCT=90 DISK_PCT=90
+  # shellcheck disable=SC2034  # N_* / A_* 由 res_check 按变量名读写
+  local C_IDLE=0 C_TOTAL=0 N_CPU=0 N_MEM=0 N_DISK=0 A_CPU=0 A_MEM=0 A_DISK=0
+  local idle total cpu=0 mem disk
+  tg_ready || return 0
+  kv_load "$TG_CONF" TG_RES CPU_PCT MEM_PCT DISK_PCT
+  [[ $TG_RES == 1 ]] || return 0
+  kv_load "$MON_STATE" "${MON_KEYS[@]}"
+  read -r idle total < <(awk '$1 == "cpu" { t = 0; for (i = 2; i <= NF; i++) t += $i; print $5 + $6, t; exit }' "${NX_PROC_STAT:-/proc/stat}")
+  if (( C_TOTAL > 0 && total > C_TOTAL )); then cpu=$(( 100 - (idle - C_IDLE) * 100 / (total - C_TOTAL) )); fi
+  mem=$(awk '$1 == "MemTotal:" { t = $2 } $1 == "MemAvailable:" { a = $2 } END { if (t) printf "%d", (t - a) * 100 / t; else print 0 }' "${NX_MEMINFO:-/proc/meminfo}")
+  disk=$(df -P / 2>/dev/null | awk 'NR == 2 { sub(/%/, "", $5); print $5 + 0 }')
+  if (( C_TOTAL > 0 )); then res_check CPU "$cpu" "$CPU_PCT" "CPU 使用率"; fi
+  res_check MEM "${mem:-0}" "$MEM_PCT" "内存使用率"
+  res_check DISK "${disk:-0}" "$DISK_PCT" "系统盘使用率"
+  C_IDLE=$idle C_TOTAL=$total
+  kv_save "$MON_STATE" "${MON_KEYS[@]}"
+}
+
+monitor_tick() {
+  if has flock; then
+    exec 9>"$NX_DIR/.monitor.lock"
+    flock -n 9 || { exec 9>&-; return 0; }
+  fi
+  traffic_tick
+  res_tick
+  # 菜单里调用后要释放，否则菜单开着期间定时任务都拿不到锁
+  if has flock; then exec 9>&-; fi
+}
+
+# 流量统计或资源告警任一开着就保留每分钟的定时器，都关了就删掉
+monitor_sync() {
+  local TR_ON=0 TG_RES=0
+  kv_load "$TR_CONF" TR_ON
+  if tg_ready; then kv_load "$TG_CONF" TG_RES; fi
+  if [[ $TR_ON == 1 || $TG_RES == 1 ]]; then
+    [[ -x $NX_BIN ]] || self_install >/dev/null 2>&1
+    sched_set "$MON_UNIT" minute "$NX_BIN monitor tick" "nx: 月流量统计和资源告警"
+  else
+    sched_del "$MON_UNIT"
+  fi
+}
+
+# ================================================================== 网站反代（Caddy）
+CADDY_FILE=/etc/caddy/Caddyfile
+CADDY_SITES=/etc/caddy/nx-sites
+CADDY_UNIT=/etc/systemd/system/caddy.service
+CADDY_VER=2.10.0
+CADDY_H3_MARK="# nx: 443/udp 被其他程序占用，关闭 HTTP/3"
+
+# caddy_port_busy：TCP 80/443 被 Caddy 以外的程序占用时打印「端口 程序名」
+caddy_port_busy() {
+  local p who
+  for p in 80 443; do
+    [[ -n $(ssq -lnt "( sport = :$p )") ]] || continue
+    who=$(ssq -lntp "( sport = :$p )" | grep -oE 'users:\(\("[^"]+"' | head -n 1 | cut -d'"' -f2)
+    [[ $who == caddy ]] && continue
+    echo "$p ${who:-未知程序}"
+    return 0
+  done
+  return 1
+}
+
+caddy_udp443_owner() {
+  local who
+  [[ -n $(ssq -lnu "( sport = :443 )") ]] || return 1
+  who=$(ssq -lnup "( sport = :443 )" | grep -oE 'users:\(\("[^"]+"' | head -n 1 | cut -d'"' -f2)
+  [[ $who == caddy ]] && return 1
+  echo "${who:-未知程序}"
+}
+
+caddy_systemd() { has systemctl && [[ -d /run/systemd/system ]]; }
+
+caddy_static() {
+  local arch tmp
+  case $(uname -m) in
+    x86_64|amd64) arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) err "系统软件源里没有 Caddy，静态版也不支持 $(uname -m)"; return 1 ;;
+  esac
+  caddy_systemd || { err "系统软件源里没有 Caddy，且没有 systemd，无法自动配置服务"; return 1; }
+  tmp=$(mktemp -d)
+  info "下载 Caddy 官方静态版..."
+  if ! { dl "https://caddyserver.com/api/download?os=linux&arch=$arch" "$tmp/caddy" 300 && chmod +x "$tmp/caddy" && "$tmp/caddy" version >/dev/null 2>&1; }; then
+    rm -f "$tmp/caddy"
+    if ! { gh_dl "https://github.com/caddyserver/caddy/releases/download/v$CADDY_VER/caddy_${CADDY_VER}_linux_$arch.tar.gz" "$tmp/c.tgz" 300 \
+        && tar xzf "$tmp/c.tgz" -C "$tmp" caddy && "$tmp/caddy" version >/dev/null 2>&1; }; then
+      rm -rf "$tmp"
+      err "Caddy 下载失败"
+      return 1
+    fi
+  fi
+  install -m 755 "$tmp/caddy" /usr/bin/caddy
+  rm -rf "$tmp"
+  if ! id caddy >/dev/null 2>&1; then
+    groupadd --system caddy 2>/dev/null
+    useradd --system --gid caddy --create-home --home-dir /var/lib/caddy --shell "$(command -v nologin || echo /bin/false)" --comment "Caddy web server" caddy
+  fi
+  mkdir -p /etc/caddy
+  cat >"$CADDY_UNIT" <<'EOF'
+# nx: Caddy 静态版服务（nx site 安装）
+[Unit]
+Description=Caddy
+Documentation=https://caddyserver.com/docs/
+After=network.target network-online.target
+Requires=network-online.target
+
+[Service]
+Type=notify
+User=caddy
+Group=caddy
+ExecStart=/usr/bin/caddy run --environ --config /etc/caddy/Caddyfile
+ExecReload=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+PrivateTmp=true
+ProtectSystem=full
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+}
+
+caddy_base_config() {
+  mkdir -p "$CADDY_SITES"
+  [[ -f $CADDY_FILE ]] || printf '# Caddy 主配置\n' >"$CADDY_FILE"
+  if ! grep -qxF "import $CADDY_SITES/*.caddy" "$CADDY_FILE"; then
+    if [[ -n $(tail -n 1 "$CADDY_FILE") ]]; then echo >>"$CADDY_FILE"; fi
+    printf '# NX 工具箱添加的站点（nx site）\nimport %s/*.caddy\n' "$CADDY_SITES" >>"$CADDY_FILE"
+  fi
+}
+
+# 443/udp 被 hysteria 等占用时 Caddy 起不来 HTTP/3 会整体启动失败，只能在全局配置里关掉 HTTP/3
+caddy_h3_off() {
+  local who=$1 tmp
+  grep -qxF "$CADDY_H3_MARK" "$CADDY_FILE" && return 0
+  if [[ $(grep -vE '^[[:space:]]*(#|$)' "$CADDY_FILE" | head -n 1 | tr -d '[:space:]') == "{" ]]; then
+    err "443/udp 被 $who 占用，需要关掉 Caddy 的 HTTP/3：请在 $CADDY_FILE 开头的全局配置块里加上 servers { protocols h1 h2 }"
+    return 1
+  fi
+  tmp=$(mktemp)
+  { printf '%s\n{\n\tservers {\n\t\tprotocols h1 h2\n\t}\n}\n# nx: end\n' "$CADDY_H3_MARK"; cat "$CADDY_FILE"; } >"$tmp"
+  cat "$tmp" >"$CADDY_FILE"
+  rm -f "$tmp"
+  warn "443/udp 被 $who 占用，已关闭 Caddy 的 HTTP/3（HTTPS 不受影响）"
+}
+
+caddy_install() {
+  local busy
+  if ! has caddy; then
+    if busy=$(caddy_port_busy); then
+      err "端口 ${busy%% *} 已被 ${busy#* } 占用，Caddy 需要 80 和 443；装了 Nginx / 宝塔 / Nginx Proxy Manager 的话请直接用它们做反代，或先停掉"
+      return 1
+    fi
+    info "安装 Caddy..."
+    if [[ ${NX_CADDY_FROM:-pkg} == pkg ]]; then
+      case $(pkg_mgr) in
+        apt-get)
+          if [[ $APT_UPDATED == 0 ]]; then apt-get update -y >/dev/null 2>&1; APT_UPDATED=1; fi
+          if apt-cache show caddy >/dev/null 2>&1; then pkg_install caddy >/dev/null 2>&1; fi ;;
+        apk) pkg_install caddy >/dev/null 2>&1 && pkg_install caddy-openrc >/dev/null 2>&1 ;;
+        *) pkg_install caddy >/dev/null 2>&1 ;;
+      esac
+    fi
+    if ! has caddy; then caddy_static || return 1; fi
+    has caddy || { err "Caddy 安装失败"; return 1; }
+    ok "已安装 Caddy $(caddy version 2>/dev/null | awk '{print $1}')"
+  fi
+  caddy_base_config
+}
+
+caddy_validate() {
+  local out
+  out=$(caddy validate --config "$CADDY_FILE" --adapter caddyfile 2>&1) && return 0
+  err "Caddy 配置检查没通过："
+  grep -v '^{"level":"info"' <<<"$out" | tail -n 3 | sed 's/^/    /'
+  return 1
+}
+
+caddy_reload() {
+  if caddy_systemd; then
+    systemctl enable caddy >/dev/null 2>&1
+    if systemctl is-active --quiet caddy; then systemctl reload caddy; else systemctl restart caddy; fi
+    sleep 1
+    systemctl is-active --quiet caddy
+  elif has rc-service; then
+    rc-update add caddy default >/dev/null 2>&1
+    if rc-service caddy status >/dev/null 2>&1; then rc-service caddy reload; else rc-service caddy restart; fi
+  else
+    return 1
+  fi
+}
+
+caddy_mode_name() { case $1 in auto) echo "自动 HTTPS" ;; internal) echo "自签证书" ;; http) echo "只用 HTTP" ;; *) echo "$1" ;; esac; }
+
+caddy_status() {
+  local f doms up mode st n=0
+  if ! has caddy; then row "Caddy" "未安装（添加第一个站点时自动安装）"; return 0; fi
+  if caddy_systemd; then
+    if systemctl is-active --quiet caddy; then st="${C_GRN}运行中${C_RST}"; else st="${C_RED}未运行${C_RST}"; fi
+  elif has rc-service && rc-service caddy status >/dev/null 2>&1; then st="${C_GRN}运行中${C_RST}"
+  else st="${C_RED}未运行${C_RST}"; fi
+  row "Caddy" "$(caddy version 2>/dev/null | awk '{print $1}')，$st"
+  for f in "$CADDY_SITES"/*.caddy; do
+    [[ -f $f ]] || continue
+    read -r doms up mode < <(sed -n '1s/^# nx-site domains=\([^ ]*\) upstream=\([^ ]*\) tls=\([^ ]*\).*/\1 \2 \3/p' "$f")
+    [[ -n $doms ]] || continue
+    printf '    %-36s → %-26s %s\n' "${doms//,/ }" "$up" "$(caddy_mode_name "$mode")"
+    n=$((n + 1))
+  done
+  (( n )) || row "站点" "还没有"
+}
+
+# caddy_site_add [域名,域名] [上游] [auto|internal|http]：不带参数时逐项询问
+caddy_site_add() {
+  local doms=${1:-} up=${2:-} mode=${3:-} email="" d first f old="" sites="" ip addrs v who had=0
+  if [[ -z $doms ]]; then ask doms "域名（多个用空格或逗号分开，如 a.com www.a.com）" "" || return 1; fi
+  doms=$(tr ',A-Z' ' a-z' <<<"$doms" | xargs 2>/dev/null)
+  [[ -n $doms ]] || { err "域名不能为空"; return 1; }
+  for d in $doms; do
+    [[ $d =~ ^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z0-9-]{2,}$ ]] || { err "域名格式不对：$d"; return 1; }
+  done
+  first=${doms%% *}
+  if [[ -z $up ]]; then ask up "反代到哪里（端口如 8080，或 127.0.0.1:8080、http://10.0.0.2:3000）" "" || return 1; fi
+  [[ $up =~ ^[0-9]+$ ]] && up="127.0.0.1:$up"
+  if ! [[ $up =~ ^https?://([A-Za-z0-9._-]+|\[[0-9A-Fa-f:]+\])(:[0-9]{1,5})?$ || $up =~ ^([A-Za-z0-9._-]+|\[[0-9A-Fa-f:]+\]):[0-9]{1,5}$ ]]; then
+    err "上游地址格式不对：$up（写 端口、主机:端口 或 http(s)://主机:端口，不能带路径）"
+    return 1
+  fi
+  if [[ -z $mode ]]; then
+    echo "  证书：1) 自动申请（Let's Encrypt；域名要先解析到本机，80/443 要能从外网访问）"
+    echo "        2) Caddy 自签（内网或测试用，浏览器会提示不安全）"
+    echo "        3) 只用 HTTP（前面有 Cloudflare 等 CDN 负责 HTTPS 时）"
+    v=1
+    ask v "选择" "$v" || return 1
+    case $v in 1) mode=auto ;; 2) mode=internal ;; 3) mode=http ;; *) err "无效选择"; return 1 ;; esac
+  fi
+  case $mode in auto|internal|http) ;; *) err "证书方式只能是 auto / internal / http"; return 1 ;; esac
+  if [[ $mode == auto ]]; then
+    ip=$(public_ipv4)
+    for d in $doms; do
+      addrs=$(getent ahosts "$d" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ')
+      if [[ -z $addrs ]]; then
+        warn "$d 还没有解析到任何地址；解析生效后 Caddy 会自动重试申请证书"
+      elif [[ -n $ip && " $addrs" != *" $ip "* && $addrs != *:* ]]; then
+        warn "$d 解析到 ${addrs% }，不是本机 $ip；开了 CDN 代理（如 Cloudflare 橙色云）时请先关掉，或改用 3) 只用 HTTP"
+      fi
+    done
+    ask email "证书通知邮箱（可留空）" "" || return 1
+    [[ -z $email || $email =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]] || { err "邮箱格式不对：$email"; return 1; }
+  fi
+  caddy_install || return 1
+  if [[ $mode != http ]] && who=$(caddy_udp443_owner); then caddy_h3_off "$who" || return 1; fi
+  f=$CADDY_SITES/$first.caddy
+  if [[ -f $f ]]; then
+    confirm "$first 已经有配置，覆盖?" N || return 1
+    old=$(cat "$f")
+    had=1
+  fi
+  for d in $doms; do
+    [[ $mode == http ]] && d="http://$d"
+    sites+="${sites:+, }$d"
+  done
+  {
+    printf '# nx-site domains=%s upstream=%s tls=%s\n' "${doms// /,}" "$up" "$mode"
+    printf '%s {\n' "$sites"
+    if [[ $mode == internal ]]; then printf '\ttls internal\n'; fi
+    if [[ -n $email ]]; then printf '\ttls %s\n' "$email"; fi
+    printf '\tencode zstd gzip\n'
+    if [[ $up == https://* ]]; then
+      printf '\treverse_proxy %s {\n\t\theader_up Host {upstream_hostport}\n\t}\n' "$up"
+    else
+      printf '\treverse_proxy %s\n' "$up"
+    fi
+    printf '}\n'
+  } >"$f"
+  if ! caddy_validate; then
+    if (( had )); then printf '%s\n' "$old" >"$f"; else rm -f "$f"; fi
+    err "已撤销这次修改"
+    return 1
+  fi
+  fw_open 80 tcp
+  if [[ $mode != http ]]; then fw_open 443 both; fi
+  caddy_reload || { err "Caddy 没能启动，查看: journalctl -u caddy -n 50"; return 1; }
+  if [[ $mode == http ]]; then
+    ok "已添加 http://$first → $up"
+  else
+    ok "已添加 https://$first → $up"
+    if [[ $mode == auto ]]; then info "Caddy 会在后台自动申请证书，通常一分钟内完成；进度看 journalctl -u caddy -f"; fi
+  fi
+}
+
+caddy_site_del() {
+  local n=${1:-} f old
+  if [[ -z $n ]]; then ask n "要删除的站点（填它的第一个域名）" "" || return 1; fi
+  n=$(tr 'A-Z' 'a-z' <<<"$n")
+  f=$CADDY_SITES/$n.caddy
+  [[ $n =~ ^[a-z0-9.-]+$ && -f $f ]] || { err "没有这个站点：$n"; return 1; }
+  old=$(cat "$f")
+  rm -f "$f"
+  if ! caddy_validate; then printf '%s\n' "$old" >"$f"; return 1; fi
+  caddy_reload
+  ok "已删除站点 $n"
+}
+
+caddy_logs() {
+  if caddy_systemd; then journalctl -u caddy -n 40 --no-pager; else info "没有 systemd，日志在系统日志里（/var/log/messages）"; fi
+}
+
+# 只撤掉 NX 加的东西：站点目录、import 行、关 HTTP/3 的全局块
+caddy_sites_purge() {
+  rm -rf "$CADDY_SITES"
+  [[ -f $CADDY_FILE ]] || return 0
+  sed -i -e "\|^import $CADDY_SITES/\*\.caddy\$|d" -e '/^# NX 工具箱添加的站点（nx site）$/d' "$CADDY_FILE"
+  sed -i "\|^$CADDY_H3_MARK\$|,\|^# nx: end\$|d" "$CADDY_FILE"
+}
+
+caddy_uninstall() {
+  if ! has caddy && [[ ! -d $CADDY_SITES ]]; then info "没有安装 Caddy"; return 0; fi
+  confirm "删除 NX 添加的全部站点?" N || return 1
+  caddy_sites_purge
+  if has caddy && confirm_opt "同时卸载 Caddy 程序?" N; then
+    if caddy_systemd; then systemctl disable --now caddy >/dev/null 2>&1; elif has rc-service; then rc-service caddy stop >/dev/null 2>&1; fi
+    if [[ -f $CADDY_UNIT ]] && grep -q '^# nx: Caddy 静态版' "$CADDY_UNIT"; then
+      rm -f "$CADDY_UNIT" /usr/bin/caddy
+      systemctl daemon-reload
+    else
+      pkg_remove caddy caddy-openrc >/dev/null 2>&1
+    fi
+    fw_close 80 tcp
+    fw_close 443 both
+    ok "已卸载 Caddy"
+  else
+    if has caddy; then caddy_reload >/dev/null 2>&1; fi
+    ok "已删除 NX 添加的站点"
+  fi
+}
+
+menu_caddy() {
+  local c
+  while :; do
+    title "网站反代（Caddy）"
+    caddy_status
+    hr
+    item2 1 "添加站点（自动 HTTPS）" 2 "删除站点"
+    item2 3 "查看 Caddy 日志" 4 "重载配置"
+    item 5 "卸载"
+    item 0 "返回"
+    read_choice c
+    case $c in
+      1) caddy_site_add; pause ;;
+      2) caddy_site_del; pause ;;
+      3) caddy_logs; pause ;;
+      4) if has caddy && caddy_validate && caddy_reload; then ok "已重载"; fi; pause ;;
+      5) caddy_uninstall; pause ;;
+      0) return ;;
+    esac
+  done
+}
+
+site_cli() {
+  case ${1:-} in
+    "") menu_caddy ;;
+    list|ls) caddy_status ;;
+    add) shift; caddy_site_add "$@" ;;
+    del|rm) caddy_site_del "${2:-}" ;;
+    *) err "用法: nx site [list | add 域名[,域名] 上游 [auto|internal|http] | del 域名]"; return 2 ;;
+  esac
+}
+
+# ================================================================== 定时备份（rclone）
+BK_DIR=$NX_DIR/backup
+BK_KEYS=(SRC DEST KEEP TIME PRE)
+
+rclone_install() {
+  local arch tmp
+  has rclone && return 0
+  case $(uname -m) in
+    x86_64|amd64) arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    armv7l) arch=arm-v7 ;;
+    *) arch="" ;;
+  esac
+  info "安装 rclone..."
+  tmp=$(mktemp -d)
+  if [[ -n $arch ]] && ensure_cmd unzip && dl "https://downloads.rclone.org/rclone-current-linux-$arch.zip" "$tmp/r.zip" 300 \
+    && unzip -q "$tmp/r.zip" -d "$tmp" && install -m 755 "$tmp"/rclone-*-linux-"$arch"/rclone /usr/bin/rclone; then
+    :
+  else
+    warn "官方下载失败，改用系统软件源里的 rclone（版本可能较旧）"
+    pkg_install rclone >/dev/null 2>&1
+  fi
+  rm -rf "$tmp"
+  has rclone || { err "rclone 安装失败"; return 1; }
+  ok "已安装 rclone $(rclone version 2>/dev/null | awk 'NR == 1 {print $2}')"
+}
+
+bk_names() { local f; for f in "$BK_DIR"/*.conf; do [[ -f $f ]] && basename "$f" .conf; done; }
+bk_name_ok() { [[ $1 =~ ^[A-Za-z0-9_-]{1,32}$ && -f $BK_DIR/$1.conf ]]; }
+
+# bk_join 目标 文件名：sftp 等网盘里 remote:/x 和 remote:x 含义不同，冒号后不能硬加斜杠
+bk_join() { case $1 in *:|*/) printf '%s%s' "$1" "$2" ;; *) printf '%s/%s' "$1" "$2" ;; esac; }
+
+bk_list() {
+  local n SRC DEST KEEP TIME PRE any=0
+  for n in $(bk_names); do
+    SRC="" DEST="" KEEP=7 TIME="" PRE=""
+    kv_load "$BK_DIR/$n.conf" "${BK_KEYS[@]}"
+    printf '  %s%s%s  每天 %s，保留最近 %s 份 → %s\n' "$C_BLD" "$n" "$C_RST" "$TIME" "$KEEP" "$DEST"
+    printf '      来源: %s\n' "$SRC"
+    if [[ -n $PRE ]]; then printf '      备份前执行: %s\n' "$PRE"; fi
+    printf '      上次: %s\n' "$(cat "$BK_DIR/$n.last" 2>/dev/null || echo 还没运行过)"
+    any=1
+  done
+  (( any )) || row "备份任务" "还没有"
+}
+
+bk_done() {
+  local name=$1 st=$2 msg=$3
+  printf '%s %s %s\n' "$st" "$(date '+%F %T')" "$msg" >"$BK_DIR/$name.last"
+  if [[ $st == 成功 ]]; then
+    ok "备份完成：$msg"
+  else
+    err "备份 $name 失败：$msg"
+    tg_notify backup "备份 $name 失败：$msg"
+  fi
+}
+
+bk_run() {
+  # shellcheck disable=SC2034  # TIME 由 kv_load 一并读入，这里用不到
+  local name=${1:-} SRC="" DEST="" KEEP=7 TIME="" PRE="" stamp tmp arch out rc p size
+  local -a src rel old
+  bk_name_ok "$name" || { err "没有这个备份任务：$name"; return 1; }
+  kv_load "$BK_DIR/$name.conf" "${BK_KEYS[@]}"
+  export HOME=${HOME:-/root}
+  has rclone || { bk_done "$name" 失败 "没有安装 rclone"; return 1; }
+  exec 7>"$BK_DIR/.$name.lock"
+  if ! flock -n 7; then exec 7>&-; warn "备份 $name 正在运行"; return 1; fi
+  rc=0
+  stamp=$(date +%Y%m%d-%H%M%S)
+  tmp=$(mktemp -d /var/tmp/nx-backup.XXXXXX)
+  arch=$tmp/$name-$stamp.tar.gz
+  info "备份 $name ..."
+  if [[ -n $PRE ]] && ! out=$(bash -c "$PRE" 2>&1); then
+    bk_done "$name" 失败 "备份前命令出错：$(tail -n 2 <<<"$out" | tr '\n' ' ')"
+    rc=1
+  fi
+  if (( rc == 0 )); then
+    read -ra src <<<"$SRC"
+    rel=()
+    for p in "${src[@]}"; do
+      if [[ -e $p ]]; then rel+=("${p#/}"); else warn "跳过不存在的路径：$p"; fi
+    done
+    if (( ${#rel[@]} == 0 )); then
+      bk_done "$name" 失败 "要备份的路径都不存在"
+      rc=1
+    else
+      tar -czf "$arch" -C / "${rel[@]}" 2>"$tmp/tar.err"
+      if (( $? > 1 )); then
+        bk_done "$name" 失败 "打包出错：$(tail -n 2 "$tmp/tar.err" | tr '\n' ' ')"
+        rc=1
+      fi
+    fi
+  fi
+  if (( rc == 0 )); then
+    size=$(fmt_bytes "$(stat -c %s "$arch")")
+    if ! out=$(rclone copyto "$arch" "$(bk_join "$DEST" "$name-$stamp.tar.gz")" 2>&1); then
+      bk_done "$name" 失败 "上传出错：$(tail -n 2 <<<"$out" | tr '\n' ' ')"
+      rc=1
+    fi
+  fi
+  rm -rf "$tmp"
+  if (( rc == 0 )); then
+    mapfile -t old < <(rclone lsf "$DEST" --files-only --include "$name-[0-9]*.tar.gz" 2>/dev/null | sort \
+      | awk -v k="$KEEP" '{ a[NR] = $0 } END { for (i = 1; i <= NR - k; i++) print a[i] }')
+    for p in "${old[@]}"; do rclone deletefile "$(bk_join "$DEST" "$p")" >/dev/null 2>&1; done
+    bk_done "$name" 成功 "$name-$stamp.tar.gz（$size），清理旧备份 ${#old[@]} 份"
+  fi
+  exec 7>&-
+  return "$rc"
+}
+
+bk_add() {
+  local name="" SRC="" DEST="" KEEP=7 TIME=04:00 PRE="" p remotes
+  local -a src
+  rclone_install || return 1
+  export HOME=${HOME:-/root}
+  remotes=$(rclone listremotes 2>/dev/null)
+  if [[ -z $remotes ]]; then
+    info "还没有配置网盘，现在打开 rclone 配置向导：按 n 新建、起个名字、选网盘类型（S3/R2、WebDAV、OneDrive、Google Drive、SFTP 等），配完按 q 退出"
+    pause
+    rclone config
+    remotes=$(rclone listremotes 2>/dev/null)
+    [[ -n $remotes ]] || { err "还是没有可用的网盘配置"; return 1; }
+  fi
+  ask name "任务名（字母、数字、- 或 _，如 web）" "" || return 1
+  [[ $name =~ ^[A-Za-z0-9_-]{1,32}$ ]] || { err "任务名格式不对：$name"; return 1; }
+  if [[ -f $BK_DIR/$name.conf ]]; then
+    kv_load "$BK_DIR/$name.conf" "${BK_KEYS[@]}"
+    info "任务 $name 已存在，下面直接回车沿用原来的设置"
+  fi
+  ask SRC "要备份的目录或文件（绝对路径，多个用空格分开）" "$SRC" || return 1
+  read -ra src <<<"$SRC"
+  (( ${#src[@]} )) || { err "至少要填一个路径"; return 1; }
+  for p in "${src[@]}"; do
+    [[ $p == /* && -e $p ]] || { err "路径不存在或不是绝对路径：$p"; return 1; }
+  done
+  SRC=${src[*]}
+  echo "  已配置的网盘: $(tr '\n' ' ' <<<"$remotes")"
+  ask DEST "上传到（网盘名:目录）" "${DEST:-${remotes%%$'\n'*}nx-backup/$(hostname)}" || return 1
+  grep -qxF "${DEST%%:*}:" <<<"$remotes" || { err "没有叫 ${DEST%%:*} 的网盘配置（格式：网盘名:目录）"; return 1; }
+  ask KEEP "保留最近几份" "$KEEP" || return 1
+  if ! is_uint "$KEEP" || (( KEEP < 1 )); then err "保留份数要是正整数"; return 1; fi
+  ask TIME "每天几点备份（HH:MM）" "$TIME" || return 1
+  [[ $TIME =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || { err "时间格式不对：$TIME"; return 1; }
+  ask PRE "备份前先执行的命令（如把数据库导出到要备份的目录里；可留空）" "$PRE" || return 1
+  mkdir -p "$BK_DIR"
+  kv_save "$BK_DIR/$name.conf" "${BK_KEYS[@]}"
+  [[ -x $NX_BIN ]] || self_install >/dev/null 2>&1
+  sched_set "nx-backup-$name" "daily=$TIME" "$NX_BIN backup run $name" "nx: 定时备份 $name" || { err "创建定时任务失败"; return 1; }
+  ok "已保存：每天 $TIME 备份到 $DEST，保留最近 $KEEP 份"
+  if tg_ready; then info "备份失败时会发 Telegram 通知"; fi
+  if confirm_opt "现在先备份一次试试?" Y; then bk_run "$name"; fi
+}
+
+bk_del() {
+  local name=${1:-}
+  if [[ -z $name ]]; then ask name "要删除的任务名" "" || return 1; fi
+  bk_name_ok "$name" || { err "没有这个备份任务：$name"; return 1; }
+  sched_del "nx-backup-$name"
+  rm -f "$BK_DIR/$name.conf" "$BK_DIR/$name.last" "$BK_DIR/.$name.lock"
+  ok "已删除任务 $name（网盘上已有的备份文件不动）"
+}
+
+bk_purge() {
+  local n
+  for n in $(bk_names); do sched_del "nx-backup-$n"; done
+  rm -rf "$BK_DIR"
+}
+
+menu_backup() {
+  local c n
+  while :; do
+    title "定时备份（rclone）"
+    bk_list
+    hr
+    item2 1 "新建 / 修改备份任务" 2 "立即备份一次"
+    item2 3 "删除备份任务" 4 "配置网盘（rclone config）"
+    item 0 "返回"
+    read_choice c
+    case $c in
+      1) bk_add; pause ;;
+      2) n=""; ask n "任务名" "$(bk_names | head -n 1)" && bk_run "$n"; pause ;;
+      3) bk_del; pause ;;
+      4) if rclone_install; then HOME=${HOME:-/root} rclone config; fi; pause ;;
+      0) return ;;
+    esac
+  done
+}
+
+backup_cli() {
+  case ${1:-} in
+    "") menu_backup ;;
+    list|ls) bk_list ;;
+    run) bk_run "${2:-}" ;;
+    del|rm) bk_del "${2:-}" ;;
+    *) err "用法: nx backup [list | run 任务名 | del 任务名]"; return 2 ;;
+  esac
 }
 
 # ================================================================== LXC 切小鸡（Incus，兼容 LXD）
@@ -2248,6 +4133,7 @@ lxc_validate_c() {
     [[ -z $x || $x =~ ^[0-9]+(iops)?$ ]] || { err "读写限速无效: $x（MB/s 写数字，IOPS 写如 1000iops）"; return 1; }
   done
   is_uint "$C_TRAFFIC" || { err "月流量无效（GB，0 不限）"; return 1; }
+  case $C_IPV6 in 0|1) ;; *) is_ipv6 "$C_IPV6" || { err "IPv6 地址无效: $C_IPV6"; return 1; } ;; esac
   [[ $C_TACT == limit || $C_TACT == stop ]] || { err "超流量处理只能是 limit（限速）或 stop（关机）"; return 1; }
   [[ $C_TCOUNT =~ ^(both|out|in|max)$ ]] || { err "流量计算方式只能是 both / out / in / max"; return 1; }
   is_uint "$C_TRATE" && (( C_TRATE >= 1 )) || { err "超流量后的限速至少 1 Mbps"; return 1; }
@@ -2325,6 +4211,10 @@ lxc_create_do() {
       $IC delete -f "$C_NAME" >/dev/null 2>&1
       return 1
     fi
+  fi
+  if [[ -z ${LXC_DISK_WARNED:-} ]] && ! lxc_disk_capped "$C_NAME"; then
+    warn "存储池是 dir（文件系统没开 project quota），硬盘 ${C_DISK}GB 只做记录，不限制实际用量；要限制请用 LVM / btrfs / ZFS 存储池"
+    LXC_DISK_WARNED=1
   fi
   if ! out=$($IC config device override "$C_NAME" eth0 "${nicopt[@]}" 2>&1); then
     err "设置网卡失败: $out"; $IC delete -f "$C_NAME" >/dev/null 2>&1; return 1
@@ -2427,7 +4317,7 @@ lxc_print_info() {
   hr
   printf '  %s小鸡 %s%s\n' "$C_GRN$C_BLD" "$n" "$C_RST"
   row "系统" "$(lxc_info_get "$n" IMAGE)"
-  local pin rd wr ni no quota exp
+  local pin rd wr ni no quota exp cap=""
   pin=$(lxc_info_get "$n" CPU_PIN)
   rd=$(lxc_info_get "$n" READ); rd=${rd:-$(lxc_info_get "$n" IO)}
   wr=$(lxc_info_get "$n" WRITE); wr=${wr:-$(lxc_info_get "$n" IO)}
@@ -2436,7 +4326,8 @@ lxc_print_info() {
   quota=$(lxc_info_get "$n" TRAFFIC); exp=$(lxc_info_get "$n" EXPIRE)
   row "CPU" "$(lxc_info_get "$n" CPU) 核（性能上限 $(lxc_info_get "$n" CPU_CAP)%）${pin:+ · 绑定核 $pin}"
   row "内存/Swap" "$(lxc_info_get "$n" MEM) MB / $(lxc_info_get "$n" SWAP) MB"
-  row "硬盘" "$(lxc_info_get "$n" DISK) GB · 读 $(io_desc "$rd") · 写 $(io_desc "$wr")"
+  lxc_disk_capped "$n" || cap="（dir 存储池，不限制）"
+  row "硬盘" "$(lxc_info_get "$n" DISK) GB${cap} · 读 $(io_desc "$rd") · 写 $(io_desc "$wr")"
   if [[ ${ni:-0} == "${no:-0}" ]]; then row "带宽" "$(mbps_desc "$ni")（上下行）"
   else row "带宽" "下行 $(mbps_desc "$ni") · 上行 $(mbps_desc "$no")"; fi
   if [[ ${quota:-0} != 0 ]]; then
@@ -2667,7 +4558,7 @@ lxc_cpu_cap_apply() { # 名称 [上限%]
 }
 
 lxc_set_cli() { # nx lxc set 名称 [选项]：资源、限速、流量配额、到期，均即时生效
-  local n=${1:-} o v cores ni no rd wr guard=0 changed=0 restart=0
+  local n=${1:-} o v cores ni no rd wr guard=0 changed=0 restart=0 nocap=""
   [[ $# -gt 0 ]] && shift
   lxc_exists "$n" || { err "小鸡不存在: $n"; return 1; }
   while [[ $# -gt 0 ]]; do
@@ -2705,7 +4596,8 @@ lxc_set_cli() { # nx lxc set 名称 [选项]：资源、限速、流量配额、
       --disk)
         v=$(to_gb "$v") || { err "硬盘格式无效"; return 1; }
         $IC config device set "$n" root size="${v}GiB" || return 1
-        lxc_info_set "$n" DISK "$v" ;;
+        lxc_info_set "$n" DISK "$v"
+        lxc_disk_capped "$n" || nocap=$v ;;
       --net|--net-in|--net-out)
         is_uint "$v" || { err "带宽无效: $v（Mbps，0 不限）"; return 1; }
         ni=$(lxc_info_get "$n" NET_IN); ni=${ni:-$(lxc_info_get "$n" NET)}
@@ -2761,6 +4653,7 @@ lxc_set_cli() { # nx lxc set 名称 [选项]：资源、限速、流量配额、
     lxc_guard
   fi
   [[ $changed == 1 ]] && ok "已更新 $n 的配置（立即生效）"
+  if [[ -n $nocap ]]; then warn "$n 在 dir 存储池上（文件系统没开 project quota），硬盘 ${nocap}GB 只做记录，不限制实际用量；要限制请用 LVM / btrfs / ZFS 存储池"; fi
   if [[ $restart == 1 ]]; then warn "Swap 上限需要重启小鸡后生效：nx lxc restart $n"; fi
   return 0
 }
@@ -2960,6 +4853,15 @@ lxc_nic_limit() { # 名称 下行Mbps 上行Mbps（0 不限），IPv6 网卡一�
       else $IC config device set "$n" "$d" "limits.$k=${v}Mbit" >/dev/null 2>&1; fi
     done
   done
+}
+
+# lxc_disk_capped 名称：根盘大小限制是否真的生效。dir 存储池只有底层 ext4/XFS 开了 project quota 才限制，否则 size 只是一条记录
+lxc_disk_capped() {
+  local pool src
+  pool=$($IC config device get "$1" root pool 2>/dev/null); pool=${pool:-default}
+  [[ $($IC storage list --format csv 2>/dev/null | awk -F, -v p="$pool" '$1 == p {print $2; exit}') == dir ]] || return 0
+  src=$($IC storage get "$pool" source 2>/dev/null)
+  [[ -n $src ]] && findmnt -no OPTIONS -T "$src" 2>/dev/null | grep -qE 'prjquota|pquota'
 }
 
 lxc_disk_limit() { # 名称 读 写（数字为 MB/s，带 iops 为 IOPS）
@@ -3380,9 +5282,11 @@ app_official() { # app_official 名称 来源：安装前确认
 }
 
 # 已安装就打开它自带的管理命令，否则运行官方脚本
-app_gh() { # app_gh 名称 管理命令 脚本URL
+app_gh() { # app_gh 名称 管理命令 脚本URL [依赖命令...]：官方脚本缺了就直接退出、又不自己安装的命令列在后面，先装上
   if [[ -n $2 ]] && has "$2"; then info "$1 已安装，打开它的管理菜单（以后可直接输入 $2）"; "$2"; return; fi
   app_official "$1" "$3" || return 1
+  local d
+  for d in "${@:4}"; do ensure_cmd "$d" || { err "缺少 $d，自动安装失败"; return 1; }; done
   run_remote "$3"
 }
 
@@ -3399,7 +5303,7 @@ app_1panel() {
     return 0
   fi
   app_official 1Panel "https://1panel.cn（resource.fit2cloud.com 官方脚本）" || return 1
-  run_cmd 'bash -c "$(curl -sSL https://resource.fit2cloud.com/1panel/package/v2/quick_start.sh)"'
+  run_url https://resource.fit2cloud.com/1panel/package/v2/quick_start.sh
 }
 
 app_bt() { # cn | en
@@ -3434,18 +5338,58 @@ app_v2ray_agent() {
 }
 
 # docker_app 容器名 镜像 默认端口 容器端口 [docker run 额外参数...]
+# app_run 每次先清空下面这些可选设置：
+#   APP_NET=host  用主机网络，不做端口映射，程序自己监听访问端口
+#   APP_PORTS     额外的固定端口，如 "80:80 443:443 53:53/udp"（host 网络时只用来查占用和放行防火墙）
+#   APP_PREP      首次安装、启动容器前调用的函数，参数为访问端口
+#   APP_ARGS      放在镜像名后面的参数，其中 {port} 换成访问端口
+#   APP_URL       展示的访问地址，默认 http://{host}:{port}；APP_HINT 里同样可以用 {host} {port}
+#   APP_CLEAN     卸载后调用的函数
+app_fmt() {
+  local s=$1
+  s=${s//\{host\}/$2}
+  s=${s//\{port\}/$3}
+  printf '%s' "$s"
+}
+
+# "宿主端口:容器端口[/协议] ..." → 每行 "端口 协议"
+app_port_list() {
+  local p proto
+  for p in $1; do
+    proto=tcp
+    [[ $p == */* ]] && proto=${p##*/}
+    echo "${p%%:*} $proto"
+  done
+}
+
+docker_app_start() {
+  local name=$1 img=$2 port=$3 cport=$4 p a
+  shift 4
+  local -a run=(docker run -d --name "$name" --restart=always) post=()
+  if [[ $APP_NET == host ]]; then
+    run+=(--network host)
+  else
+    run+=(-p "$port:$cport")
+    for p in $APP_PORTS; do run+=(-p "$p"); done
+  fi
+  for a in "${APP_ARGS[@]}"; do post+=("${a//\{port\}/$port}"); done
+  "${run[@]}" "$@" "$img" "${post[@]}" >/dev/null
+}
+
 docker_app() {
-  local name=$1 img=$2 dport=$3 cport=$4 port c host
+  local name=$1 img=$2 dport=$3 cport=$4 port c host hp proto
   shift 4
   host=$(public_ipv4 2>/dev/null || main_ipv4_local)
   if has docker && docker inspect "$name" >/dev/null 2>&1; then
     port=$(cat "$APP_DIR/$name.port" 2>/dev/null)
     [[ -n $port ]] || port=$(docker port "$name" "$cport/tcp" 2>/dev/null | head -n1 | awk -F: '{print $NF}')
+    if [[ -f $APP_DIR/$name.ports ]]; then APP_PORTS=$(cat "$APP_DIR/$name.ports"); fi
     title "$name（已安装）"
     row "状态" "$(docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null)"
-    row "访问" "http://$host:${port:-?}"
+    row "访问" "$(app_fmt "$APP_URL" "$host" "${port:-?}")"
+    if [[ -n $APP_PORTS ]]; then row "其它端口" "$(app_port_list "$APP_PORTS" | awk '{ printf "%s%s/%s", s, $1, $2; s = "、" }')"; fi
     row "数据" "/home/docker/$name"
-    if [[ -n $APP_HINT ]]; then row "提示" "$APP_HINT"; fi
+    if [[ -n $APP_HINT ]]; then row "提示" "$(app_fmt "$APP_HINT" "$host" "${port:-?}")"; fi
     hr
     item 1 "更新（拉取最新镜像并重建，数据保留）"
     item 2 "重启"
@@ -3456,14 +5400,18 @@ docker_app() {
       1)
         docker pull "$img" || return 1
         docker rm -f "$name" >/dev/null
-        docker run -d --name "$name" --restart=always -p "${port:-$dport}:$cport" "$@" "$img" >/dev/null && ok "$name 已更新" ;;
+        docker_app_start "$name" "$img" "${port:-$dport}" "$cport" "$@" && ok "$name 已更新" ;;
       2) docker restart "$name" >/dev/null && ok "$name 已重启" ;;
       3)
         confirm "卸载 $name?" N || return 0
         docker rm -f "$name" >/dev/null
         if confirm_opt "同时删除数据目录 /home/docker/$name?" N; then rm -rf "/home/docker/$name"; fi
         if [[ -n $port ]]; then fw_close "$port" tcp; fi
-        rm -f "$APP_DIR/$name.port"
+        while read -r hp proto; do
+          if [[ -n $hp ]]; then fw_close "$hp" "$proto"; fi
+        done < <(app_port_list "$APP_PORTS")
+        rm -f "$APP_DIR/$name.port" "$APP_DIR/$name.ports"
+        if [[ -n $APP_CLEAN ]]; then "$APP_CLEAN"; fi
         ok "$name 已卸载" ;;
     esac
     return 0
@@ -3478,18 +5426,115 @@ docker_app() {
   ask port "访问端口" "$dport" || return 1
   is_port "$port" || { err "端口无效: $port"; return 1; }
   if port_in_use "$port"; then err "端口 $port 已被占用"; return 1; fi
+  while read -r hp proto; do
+    if [[ -n $hp ]] && port_in_use "$hp"; then err "端口 $hp 已被占用（$name 要用）"; return 1; fi
+  done < <(app_port_list "$APP_PORTS")
   mkdir -p "/home/docker/$name" "$APP_DIR"
+  if [[ -n $APP_PREP ]]; then "$APP_PREP" "$port" || return 1; fi
   info "拉取镜像并启动..."
-  docker run -d --name "$name" --restart=always -p "$port:$cport" "$@" "$img" >/dev/null || { err "启动失败"; return 1; }
-  echo "$port" > "$APP_DIR/$name.port"
+  docker_app_start "$name" "$img" "$port" "$cport" "$@" || { err "启动失败"; return 1; }
+  echo "$port" >"$APP_DIR/$name.port"
+  if [[ -n $APP_PORTS ]]; then echo "$APP_PORTS" >"$APP_DIR/$name.ports"; else rm -f "$APP_DIR/$name.ports"; fi
   fw_open "$port" tcp
-  ok "$name 已启动：http://$host:$port"
-  if [[ -n $APP_HINT ]]; then info "$APP_HINT"; fi
-  warn "云服务器还需在安全组放行 $port/tcp"
+  while read -r hp proto; do
+    if [[ -n $hp ]]; then fw_open "$hp" "$proto"; fi
+  done < <(app_port_list "$APP_PORTS")
+  ok "$name 已启动：$(app_fmt "$APP_URL" "$host" "$port")"
+  if [[ -n $APP_HINT ]]; then info "$(app_fmt "$APP_HINT" "$host" "$port")"; fi
+  warn "云服务器还需在安全组放行 $port/tcp$(app_port_list "$APP_PORTS" | awk '{ printf "、%s/%s", $1, $2 }')"
+}
+
+app_vaultwarden() {
+  local t=/home/docker/vaultwarden/.admin_token
+  mkdir -p /home/docker/vaultwarden
+  [[ -s $t ]] || (umask 077; rand_pass 40 >"$t")
+  APP_HINT="管理后台 http://{host}:{port}/admin，令牌在 $t；注册好自己的账号后，可在后台 General settings 里关掉 Allow new signups；客户端要求 HTTPS，请在主菜单「网站反代（Caddy）」里给它配域名"
+  docker_app vaultwarden vaultwarden/server:latest 8222 80 -v /home/docker/vaultwarden:/data -e "ADMIN_TOKEN=$(cat "$t")"
+}
+
+RESOLVED_NX=/etc/systemd/resolved.conf.d/nx-adguard.conf
+
+resolved_stub_on() { ss -lnup 2>/dev/null | awk '$4 ~ /:53$/' | grep -q 'systemd-resolve'; }
+
+resolved_stub_off() {
+  if [[ ! -L /etc/resolv.conf ]] && grep -q '^nameserver 127\.0\.0\.53' /etc/resolv.conf 2>/dev/null; then
+    err "/etc/resolv.conf 是普通文件且写着 127.0.0.53，关掉后本机会解析不了域名；请先把它改成可用的 DNS 再装"
+    return 1
+  fi
+  mkdir -p /etc/systemd/resolved.conf.d
+  printf '[Resolve]\nDNSStubListener=no\n' >"$RESOLVED_NX"
+  if [[ -L /etc/resolv.conf && $(readlink /etc/resolv.conf) == *stub-resolv.conf ]]; then
+    ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+  fi
+  systemctl restart systemd-resolved || { err "重启 systemd-resolved 失败"; return 1; }
+  sleep 1
+  if port_in_use 53; then err "53 端口仍被占用：$(ss -lntup 2>/dev/null | awk '$5 ~ /:53$/' | head -n 2)"; return 1; fi
+  ok "已关闭 systemd-resolved 的 53 端口监听"
+}
+
+resolved_stub_restore() {
+  [[ -f $RESOLVED_NX ]] || return 0
+  rm -f "$RESOLVED_NX"
+  if [[ -L /etc/resolv.conf && $(readlink /etc/resolv.conf) == /run/systemd/resolve/resolv.conf ]]; then
+    ln -sf ../run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+  fi
+  if has systemctl; then systemctl restart systemd-resolved >/dev/null 2>&1; fi
+  info "已恢复 systemd-resolved 的 53 端口监听"
+}
+
+app_adguard() {
+  local dns
+  APP_HINT="安装向导里「网页管理界面」端口保持 3000、「DNS 服务器」端口保持 53（都是容器内的端口），否则装完打不开"
+  APP_CLEAN=resolved_stub_restore
+  if ! { has docker && docker inspect adguardhome >/dev/null 2>&1; }; then
+    ask dns "DNS 端口（tcp + udp）" 53 || return 1
+    is_port "$dns" || { err "端口无效: $dns"; return 1; }
+    if [[ $dns == 53 ]] && resolved_stub_on; then
+      warn "systemd-resolved 占着本机 53 端口"
+      confirm "关掉它的 53 端口监听（本机解析改为直接用上游 DNS，卸载 AdGuard 时恢复）?" Y || return 1
+      resolved_stub_off || return 1
+    fi
+    APP_PORTS="$dns:53/tcp $dns:53/udp"
+  fi
+  docker_app adguardhome adguard/adguardhome:latest 3000 3000 -v /home/docker/adguardhome/work:/opt/adguardhome/work -v /home/docker/adguardhome/conf:/opt/adguardhome/conf
+}
+
+frps_prep() {
+  local f=/home/docker/frps/frps.toml
+  mkdir -p /home/docker/frps
+  if [[ -f $f ]]; then
+    sed -i "s/^bindPort = .*/bindPort = $1/" "$f"
+    info "沿用已有的 $f"
+    return 0
+  fi
+  (
+    umask 077
+    cat >"$f" <<EOF
+bindPort = $1
+auth.method = "token"
+auth.token = "$(rand_pass 24)"
+
+webServer.addr = "0.0.0.0"
+webServer.port = 7500
+webServer.user = "admin"
+webServer.password = "$(rand_pass 16)"
+EOF
+  )
+  ok "已生成 $f：token $(awk -F'"' '/^auth.token/ { print $2 }' "$f")，面板账号 admin / $(awk -F'"' '/^webServer.password/ { print $2 }' "$f")"
+}
+
+app_frps() {
+  APP_NET=host
+  APP_PORTS="7500:7500"
+  APP_PREP=frps_prep
+  APP_URL="frp 服务端口 {port}，管理面板 http://{host}:7500"
+  APP_HINT="token 和面板密码在 /home/docker/frps/frps.toml；客户端 frpc 填 serverAddr = \"{host}\"、serverPort = {port} 和同一个 auth.token；穿透出来的端口还要在防火墙和安全组里放行"
+  docker_app frps snowdreamtech/frps:latest 7000 7000 -v /home/docker/frps/frps.toml:/etc/frp/frps.toml
 }
 
 app_run() { # 菜单编号或应用名
-  APP_HINT=""
+  APP_HINT="" APP_NET="" APP_PORTS="" APP_PREP="" APP_CLEAN="" APP_URL="http://{host}:{port}"
+  APP_ARGS=()
   case $1 in
     1|1panel) app_1panel ;;
     2|bt|baota) app_bt cn ;;
@@ -3501,16 +5546,30 @@ app_run() { # 菜单编号或应用名
     6|sing-box|sb) app_gh "sing-box 四合一" sb https://raw.githubusercontent.com/fscarmen/sing-box/main/sing-box.sh ;;
     7|v2ray-agent|vasma) app_v2ray_agent ;;
     8|warp) app_gh WARP warp https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh ;;
-    9|nezha) app_gh 哪吒监控 "" https://raw.githubusercontent.com/nezhahq/scripts/refs/heads/main/install.sh ;;
+    9|nezha) app_gh 哪吒监控 "" https://raw.githubusercontent.com/nezhahq/scripts/refs/heads/main/install.sh curl wget unzip ;;
     10|kuma|uptime-kuma) docker_app uptime-kuma louislam/uptime-kuma:latest 3001 3001 -v /home/docker/uptime-kuma:/app/data ;;
     11|openlist|alist)
       APP_HINT="生成管理员密码: docker exec openlist ./openlist admin random"
       # 4.1 起镜像以 UID 1001 运行，数据目录必须归它所有
       mkdir -p /home/docker/openlist && chown -R 1001:1001 /home/docker/openlist
       docker_app openlist openlistteam/openlist:latest-aria2 5244 5244 -v /home/docker/openlist:/opt/openlist/data ;;
-    *) err "未知应用: $1（可用: 1panel bt aapanel portainer 3x-ui sing-box v2ray-agent warp nezha kuma openlist）"; return 2 ;;
+    12|npm|nginx-proxy-manager)
+      APP_PORTS="80:80 443:443"
+      APP_HINT="上面的端口是管理后台，网站走 80/443；首次登录按页面提示设置管理员（旧版默认 admin@example.com / changeme）"
+      docker_app npm jc21/nginx-proxy-manager:latest 81 81 -v /home/docker/npm/data:/data -v /home/docker/npm/letsencrypt:/etc/letsencrypt ;;
+    13|vaultwarden|bitwarden) app_vaultwarden ;;
+    14|adguard|adguardhome) app_adguard ;;
+    15|ddns-go|ddns)
+      APP_NET=host
+      APP_ARGS=(-l ":{port}")
+      APP_HINT="ddns-go 默认不让从公网打开网页：先在自己电脑上执行 ssh -L {port}:127.0.0.1:{port} root@{host}，再用浏览器打开 http://127.0.0.1:{port} 完成设置；也可以在其设置里取消「禁止公网访问」"
+      docker_app ddns-go jeessy/ddns-go:latest 9876 9876 -v /home/docker/ddns-go:/root ;;
+    16|frps|frp) app_frps ;;
+    *) err "未知应用: $1（可用: $APP_NAMES）"; return 2 ;;
   esac
 }
+
+APP_NAMES="1panel bt aapanel portainer 3x-ui sing-box v2ray-agent warp nezha kuma openlist npm vaultwarden adguard ddns-go frps"
 
 menu_apps() {
   local c
@@ -3525,6 +5584,10 @@ menu_apps() {
     printf '  %s监控 / 工具%s\n' "$C_GRY" "$C_RST"
     item2 9 "哪吒监控（面板 / Agent）" 10 "Uptime Kuma（网站可用性监控）"
     item 11 "OpenList（网盘挂载与文件列表，Alist 社区版）"
+    printf '  %s建站 / 网络工具%s\n' "$C_GRY" "$C_RST"
+    item2 12 "Nginx Proxy Manager（网页反代 + 证书）" 13 "Vaultwarden（自建密码管理器）"
+    item2 14 "AdGuard Home（DNS 去广告）" 15 "ddns-go（动态域名解析）"
+    item 16 "frps（frp 内网穿透服务端）"
     hr
     printf '  %s已安装的应用再次进入即为管理 / 更新 / 卸载%s\n' "$C_GRY" "$C_RST"
     item 0 "返回"
@@ -3676,7 +5739,19 @@ tune_cli() { # nx tune [--all] [--with a,b] [--skip a,b] [--ssh-port N] [-y]
 }
 
 # ================================================================== 集成项目
+# vps-PSL V10.30 在 apt 系统上装依赖时带了不存在的 iproute2-tc，整条 apt 失败后因缺 modprobe 退出；先按正确的包名补齐
+psl_deps() {
+  local c
+  local -a miss=()
+  [[ $(pkg_mgr) == apt-get ]] || return 0
+  for c in ip tc ss modprobe ps iptables; do has "$c" || miss+=("$c"); done
+  [[ ${#miss[@]} -eq 0 ]] && return 0
+  info "补齐 PSL 依赖: ${miss[*]}"
+  pkg_install iproute2 kmod procps iptables >/dev/null 2>&1 || warn "依赖安装失败，PSL 可能无法启动"
+}
+
 psl_run() {
+  psl_deps
   if [[ -x $PSL_BIN ]]; then "$PSL_BIN"; return; fi
   info "首次使用：下载 vps-PSL 端口限速（NX2406/vps-PSL），运行后会安装 PSL / psl 命令"
   run_remote "$PSL_RAW_URL"
@@ -3687,13 +5762,16 @@ nxr_install() {
   tmp=$(mktemp)
   info "安装 Realm 转发面板 nxr（NX2406/nx-realm）"
   if gh_dl "$NXR_RAW_URL" "$tmp" 60 && grep -q '^NXR_VERSION=' "$tmp" && bash -n "$tmp" 2>/dev/null; then
-    install -m 755 "$tmp" "$NXR_BIN"
-    rm -f "$tmp"
-    ok "nxr 已安装，之后可直接输入 nxr 打开"
-    return 0
+    if install -m 755 "$tmp" "$NXR_BIN"; then
+      rm -f "$tmp"
+      ok "nxr 已安装，之后可直接输入 nxr 打开"
+      return 0
+    fi
+    err "写入 $NXR_BIN 失败"
+  else
+    err "下载 nxr 失败：$NXR_RAW_URL"
   fi
   rm -f "$tmp"
-  err "下载 nxr 失败：$NXR_RAW_URL"
   return 1
 }
 
@@ -3710,7 +5788,7 @@ script_ok() {
 
 # self_install [--force]：不会用旧版本覆盖已安装的新版本（--force 除外）
 self_install() {
-  local src=${BASH_SOURCE[0]} tmp cur force=0
+  local src=${BASH_SOURCE[0]} tmp cur force=0 rc=0
   [[ ${1:-} == --force ]] && force=1
   cur=$(grep -m1 '^NX_VERSION=' "$NX_BIN" 2>/dev/null | cut -d'"' -f2)
   if [[ -f $src && -r $src ]]; then
@@ -3720,17 +5798,21 @@ self_install() {
       warn "已安装的 nx $cur 比当前脚本 $NX_VERSION 新，未覆盖（确需降级: bash $src install --force）"
       return 0
     fi
-    install -m 755 "$src" "$NX_BIN" && info "已安装快捷命令 nx $NX_VERSION（$NX_BIN）"
+    install -m 755 "$src" "$NX_BIN" || { err "写入 $NX_BIN 失败"; return 1; }
+    info "已安装快捷命令 nx $NX_VERSION（$NX_BIN）"
     return 0
   fi
   if [[ -n $cur ]] && ! ver_gt "$NX_VERSION" "$cur"; then return 0; fi
   tmp=$(mktemp)
-  if gh_dl "$NX_RAW_URL" "$tmp" 60 && script_ok "$tmp"; then
-    install -m 755 "$tmp" "$NX_BIN" && info "已安装快捷命令 nx（$NX_BIN）"
+  if ! gh_dl "$NX_RAW_URL" "$tmp" 60 || ! script_ok "$tmp"; then
+    warn "快捷命令安装失败：无法下载 $NX_RAW_URL"; rc=1
+  elif ! install -m 755 "$tmp" "$NX_BIN"; then
+    err "写入 $NX_BIN 失败"; rc=1
   else
-    warn "快捷命令安装失败：无法下载 $NX_RAW_URL"
+    info "已安装快捷命令 nx（$NX_BIN）"
   fi
   rm -f "$tmp"
+  return "$rc"
 }
 
 nx_update() {
@@ -3750,10 +5832,13 @@ nx_update() {
 nx_uninstall() {
   local f
   title "卸载 NX 工具箱"
-  echo "  将删除 nx 命令及其快捷方式。以下独立组件不会被删除，可各自卸载："
+  echo "  将删除 nx 命令及其快捷方式，并停掉依赖它运行的后台功能："
+  echo "    · 月流量统计（已加的超额限速会解除）、Telegram 通知、定时备份、zram"
+  echo "  以下内容不会被删除，可各自管理："
   echo "    · Realm 转发面板：nxr → 99"
   echo "    · 端口限速：PSL → 10"
-  echo "    · LXC 小鸡：nx lxc uninstall"
+  echo "    · LXC 小鸡：nx lxc uninstall（要删请在卸载工具箱之前执行）"
+  echo "    · Caddy 网站、Docker 应用，以及时间同步、自动安全更新等系统设置"
   confirm "确认卸载 NX 工具箱?" N || return 1
   for f in /usr/local/bin/* /usr/bin/*; do
     if [[ -L $f && $(readlink -f "$f") == "$NX_BIN" ]]; then rm -f "$f"; fi
@@ -3763,6 +5848,11 @@ nx_uninstall() {
     lxc_guard_disable
     warn "小鸡的月流量配额与到期守护依赖 nx 命令，已一并停用"
   fi
+  traffic_purge
+  tg_purge
+  sched_del "$MON_UNIT"
+  bk_purge
+  if [[ -f $ZRAM_CONF || -f $ZRAM_SH ]]; then zram_off; fi
   rm -rf "$NX_DIR"
   rm -f "$NX_BIN"
   ok "NX 工具箱已卸载"
@@ -3795,6 +5885,8 @@ menu_main() {
     item2 5 "BBR / 网络优化" 6 "Docker 管理"
     item2 7 "测试脚本合集" 8 "系统工具"
     item2 12 "应用市场（面板/代理/监控）" 13 "一条龙系统调优"
+    item2 14 "月流量统计 / 超额限速" 15 "Telegram 通知"
+    item2 16 "网站反代（Caddy）" 17 "定时备份（rclone）"
     hr
     item2 9 "Root 登录开启（ovhroot）" 10 "端口限速（vps-PSL）"
     item 11 "LXC 切小鸡（Incus · CPU/内存/硬盘/带宽/IO/端口/IPv6/月流量/到期）"
@@ -3821,6 +5913,10 @@ menu_main() {
       11) menu_lxc ;;
       12) menu_apps ;;
       13) menu_tune ;;
+      14) menu_traffic ;;
+      15) menu_tg ;;
+      16) menu_caddy ;;
+      17) menu_backup ;;
       20) nxr_run ;;
       00) nx_update; pause ;;
       99) nx_uninstall; pause ;;
@@ -3848,11 +5944,18 @@ NX 工具箱 v$NX_VERSION · Linux VPS 常用脚本合集
   hostname <名称>       修改主机名
   tune [--all] [--with ssh,openall] [--skip swap] [--ssh-port 5522] [-y]
                         一条龙调优：更新/清理/swap/fail2ban/BBR/时区/DNS/IPv4 优先/常用工具/内核参数
-  app [名称]            应用市场：1panel bt aapanel portainer 3x-ui sing-box v2ray-agent warp nezha kuma openlist
+  app [名称]            应用市场：1panel bt aapanel portainer 3x-ui sing-box v2ray-agent warp nezha kuma
+                        openlist npm vaultwarden adguard ddns-go frps
   psl                   端口限速 vps-PSL
   lxc [子命令]          LXC 切小鸡，详见 nx lxc help
   realm | r [参数]      Realm 转发面板 nxr（独立项目，参数透传给 nxr）
-  dd                    一键 DD 重装系统
+  dd [参数]             一键 DD 重装系统；带参数时直接交给 reinstall.sh，如 nx dd debian 13
+  traffic [status]      月流量统计：超额后提醒 / 限速 / 关机
+  tg [test | send 文字]  Telegram 通知：SSH 登录、开机、资源告警、流量提醒
+  site [list | add 域名 上游 [auto|internal|http] | del 域名]
+                        网站反代（Caddy，自动申请 HTTPS 证书）
+  backup [list | run 任务名 | del 任务名]
+                        定时备份：打包目录用 rclone 传到网盘，失败时 Telegram 通知
   upgrade               更新工具箱      uninstall   卸载工具箱
   version | help
 
@@ -3909,7 +6012,14 @@ main() {
     app|apps) if [[ -n ${1:-} ]]; then app_run "$1"; else menu_apps; fi ;;
     lxc) lxc_cli "$@" ;;
     realm|r|nxr) nxr_run "$@" ;;
-    dd) menu_dd ;;
+    dd) if [[ $# -gt 0 ]]; then dd_cli "$@"; else menu_dd; fi ;;
+    traffic) if [[ ${1:-} == status ]]; then traffic_status; else menu_traffic; fi ;;
+    tg|telegram) tg_cli "$@" ;;
+    site|caddy) site_cli "$@" ;;
+    backup) backup_cli "$@" ;;
+    monitor)
+      [[ ${1:-} == tick ]] || { err "用法: nx monitor tick（由定时任务调用）"; return 2; }
+      monitor_tick ;;
     install) self_install --force ;;
     upgrade|self-update) nx_update ;;
     uninstall) nx_uninstall ;;

@@ -22,6 +22,8 @@ bash <(curl -sL https://ghfast.top/https://raw.githubusercontent.com/NX2406/nx-t
 
 已在 x86_64 上测试：Debian 12 / 13、Ubuntu 22.04 / 24.04、Rocky Linux 8 / 9、AlmaLinux 9、Alpine 3.22。其中 Debian 12 为整机（KVM）实测，含 LXC 小鸡管理、Docker 与应用市场；其余系统在 LXC 小鸡里实测，不含换内核等内核相关功能（2026-11）。Debian 11 早期测过，镜像站已下架，本轮未复测。
 
+1.2.0 新增的功能在 Debian 12 容器里逐项实测，时间同步和自动安全更新另测了 Rocky Linux 9，定时任务另测了 Alpine。DD 重装只测了选项和交给 reinstall.sh 的参数，没有真的重装（2026-11-12）。
+
 ## 功能
 
 | 菜单 | 内容 |
@@ -31,12 +33,16 @@ bash <(curl -sL https://ghfast.top/https://raw.githubusercontent.com/NX2406/nx-t
 | 5 BBR / 网络优化 | BBR + fq、代理与转发节点内核参数优化（可还原）、BBRv3 / XanMod 内核 |
 | 6 Docker | 安装、容器管理、日志、清理、镜像加速、IPv6 |
 | 7 测试脚本 | IP 质量、流媒体与 AI 解锁、回程路由、三网测速、TCP 延迟、bench / YABS / 融合怪 |
-| 8 系统工具 | root 密码、SSH 端口与密钥、Swap、时区、主机名、DNS、IPv4/IPv6 优先、防火墙、fail2ban、定时任务、换源、DD 重装、新建 sudo 用户 |
+| 8 系统工具 | root 密码、SSH 端口与密钥、Swap、时区、主机名、DNS、IPv4/IPv6 优先、防火墙、fail2ban、定时任务（没有 cron 时自动安装）、换源、DD 重装、新建 sudo 用户、zram 内存压缩、时间同步（chrony）、自动安全更新 |
 | 9 Root 登录 | 把 sudo 用户的公钥同步给 root，或开启 root 密码登录（ovhroot 增强版） |
-| 10 端口限速 | 运行 vps-PSL |
+| 10 端口限速 | 运行 vps-PSL（Debian / Ubuntu 上先补齐它需要的 iproute2、kmod、procps、iptables） |
 | 11 LXC 切小鸡 | 基于 Incus，见下文 |
-| 12 应用市场 | 1Panel、宝塔、aaPanel、Portainer、3x-ui、sing-box、v2ray-agent、WARP、哪吒监控、Uptime Kuma、OpenList |
+| 12 应用市场 | 1Panel、宝塔、aaPanel、Portainer、3x-ui、sing-box、v2ray-agent、WARP、哪吒监控、Uptime Kuma、OpenList、Nginx Proxy Manager、Vaultwarden、AdGuard Home、ddns-go、frps |
 | 13 一条龙调优 | 12 项常用初始化一次完成，可勾选 |
+| 14 月流量统计 / 超额限速 | 按服务商的计费方式（双向相加 / 只算出站 / 只算入站 / 取大的一边）统计每月流量，可按面板校准；超额后提醒、限速或关机，新周期自动解除 |
+| 15 Telegram 通知 | SSH 登录、开机、CPU / 内存 / 硬盘告警、流量提醒 |
+| 16 网站反代（Caddy） | 域名反代到本机端口或内网地址，自动申请 HTTPS 证书，也可用自签证书或只用 HTTP |
+| 17 定时备份（rclone） | 每天定时打包目录传到网盘，只保留最近几份，失败时 Telegram 通知 |
 | 20 Realm 转发面板 | 打开 `nxr`（未安装时自动安装） |
 
 SSH 相关改动（端口、密码登录、root 登录）都会先备份配置，校验 `sshd -t` 并确认新配置生效，失败自动回滚；兼容 Ubuntu 24.04 的 ssh.socket 启动方式。
@@ -88,6 +94,7 @@ nx lxc info web1                                            # 配置、SSH 地�
 - 宿主机没有 swap 时，小鸡的 Swap 配额不生效；512MB 的 Rocky / Alma 小鸡运行 dnf 可能内存不足被杀，建议先在宿主执行 `nx swap 2048`。
 - 小鸡里开 BBR 需要宿主机先加载 BBR 模块（宿主执行 `nx bbr`）。
 - 先开小鸡、后装 Docker：Docker 会把转发链设为拒绝，小鸡会断网。用 `nx docker` 安装会自动放行小鸡网桥，并在 Docker 每次启动后补上规则（重启后仍有效）；用其他方式装的 Docker，再执行一次 `nx lxc install` 即可修复（不会重建存储和网络）。
+- 硬盘大小只在 LVM、btrfs、ZFS 存储池上真正限制。dir 存储池（底层 ext4 / XFS 没开 project quota）上只是一条记录，小鸡能一直写到宿主磁盘满；开小鸡、`nx lxc set --disk` 和 `nx lxc info` 会提示。
 
 ## 应用市场
 
@@ -98,7 +105,9 @@ nx app                 # 菜单
 nx app 3x-ui           # 直接安装 / 管理某个应用
 ```
 
-可用名称：`1panel` `bt` `aapanel` `portainer` `3x-ui` `sing-box` `v2ray-agent` `warp` `nezha` `kuma` `openlist`。Docker 类应用数据保存在 `/home/docker/应用名`，访问端口安装时可改，并自动放行本机防火墙。
+可用名称：`1panel` `bt` `aapanel` `portainer` `3x-ui` `sing-box` `v2ray-agent` `warp` `nezha` `kuma` `openlist` `npm` `vaultwarden` `adguard` `ddns-go` `frps`。Docker 类应用数据保存在 `/home/docker/应用名`，访问端口安装时可改，并自动放行本机防火墙。
+
+第三方一键脚本（应用市场、测试脚本、换源）先下载到临时文件再执行：下载失败会报错并返回非 0，不会像 `bash <(curl …)` 那样看起来什么都没发生。哪吒监控会先装好官方脚本需要的 wget、unzip。
 
 ## 一条龙调优
 
@@ -110,6 +119,22 @@ nx tune --skip update,swap -y
 
 默认执行：更新系统、清理垃圾、1G Swap（已有或容器中跳过）、fail2ban、BBR、上海时区、DNS 自动优选（按是否在国内选择）、IPv4 优先、常用工具、内核网络参数优化。改 SSH 端口（`ssh`）和开放所有端口（`openall`）默认不执行，需要时用 `--with` 加上。单项失败不影响后续，最后汇总结果。
 
+## 流量、通知、反代与备份
+
+```bash
+nx traffic                               # 月流量统计：开启 / 修改、按面板校准、手动解除限速、关闭
+nx tg test                               # 给 Telegram 发一条测试消息
+nx site add example.com 8080             # 反代到本机 8080，自动申请证书
+nx site add a.com,www.a.com 127.0.0.1:3000 internal
+nx site list | del example.com
+nx backup list | run 任务名 | del 任务名   # 新建任务在菜单 17 里
+```
+
+- 月流量按网卡计数，每分钟记一次，重启后接着累计。超额限速出口用 tbf、入口用 police；网卡上已有 vps-PSL 的 HTB 规则时不覆盖。
+- Telegram 机器人在菜单 15 配置：填好 token 后给机器人发一条消息，就能自动找到 chat id。token 只存在 `/etc/nx/tg.conf`（权限 600），不会出现在命令行参数里。SSH 登录通知在后台发送，不拖慢登录。
+- Caddy 需要 80 / 443 端口：已被 Nginx、宝塔等占用时不安装，并说明是谁占的。系统软件源里没有 Caddy 时装官方静态版。NX 加的站点放在 `/etc/caddy/nx-sites/`，配置校验不过会自动撤销这次修改。
+- 备份用 rclone，第一次会进入 `rclone config` 添加网盘。可以设备份前先执行的命令（如导出数据库）。备份包里是相对路径，在 `/` 下直接解压即可还原。
+
 ## 常用命令
 
 ```
@@ -117,6 +142,7 @@ nx                       菜单
 nx info | update | clean | bbr | optimize
 nx swap 1024 | ssh-port 2222 | root [--password] | f2b | docker | tz Asia/Shanghai | hostname 名称
 nx tune | app [名称] | psl | lxc [子命令] | realm（转发面板 nxr） | dd
+nx traffic | tg [test] | site [list | add | del] | backup [list | run | del]
 nx upgrade | uninstall
 ```
 
@@ -124,7 +150,7 @@ nx upgrade | uninstall
 
 ## 卸载
 
-`nx uninstall` 删除 `nx` 命令和 `/etc/nx` 配置，可选还原 BBR 与网络优化；其他已做过的系统设置保持不变。Realm 面板（`nxr` → 99）、端口限速、LXC 小鸡不受影响，各自单独卸载；小鸡的月流量配额与到期守护依赖 `nx`，会一并停用。LXC 环境用 `nx lxc uninstall` 卸载（会删除全部小鸡）。
+`nx uninstall` 删除 `nx` 命令和 `/etc/nx` 配置，并停掉依赖 nx 运行的后台功能：月流量统计（已加的超额限速会解除）、Telegram 通知（含 SSH 登录钩子）、定时备份、zram；网盘里已有的备份不删。可选还原 BBR 与网络优化；其他已做过的系统设置（时间同步、自动安全更新等）保持不变。Realm 面板（`nxr` → 99）、端口限速、LXC 小鸡、Caddy 网站和 Docker 应用不受影响，各自单独卸载；小鸡的月流量配额与到期守护依赖 `nx`，会一并停用。LXC 环境用 `nx lxc uninstall` 卸载（会删除全部小鸡）。
 
 ## 许可与致谢
 
